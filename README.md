@@ -2,13 +2,22 @@
 
 自托管的 GitHub 仓库动态哨兵：订阅仓库 → 定时增量采集 commit / issue / PR / release → AI 归纳成摘要报告 → 邮件推送 → 看板回看。
 
+v2.0 起另有一条独立的「每日动线」：按项目 + 日期落一份每日进展 Markdown，再让 DeepSeek 汇总成正式的项目每日报告。
+
 ```
 定时 tick(60s) → 抢占到期订阅 → 增量采集(GitHub REST) → 过滤去重(SQLite)
               → 规则预压缩 → LLM 摘要(失败降级 Mock) → 渲染 HTML → 通知(SMTP) → 重排下一次
+
+每日动线（手动 / 外部 cron 触发）：
+progress → GitHub 当日 issues/PR → data/daily/{YYYY}/{MM}/{repo}/{date}.md
+report   → 读上面的 md → deepseek-flash → ...-report.md（失败降级规则模板）
 ```
 
-**当前状态：Stage 1 已完成**。全链路可运行，GitHub 用内置 Fake、LLM 用规则 Mock、通知走 dry-run，
-`pytest` 48 个用例全绿，分层检查通过。
+**当前状态：v2.0**。周期简报链路可运行（默认 Fake GitHub + Mock LLM + dry-run 通知）；
+真实 GitHub REST（四资源、分页、ETag、限流退避）与 DeepSeek `deepseek-flash` 已接通，
+每日进展与每日报告落 `data/daily/`。`pytest` 163 个用例全绿，分层检查与 ruff 通过。
+
+版本变更见 [`docs/releases/v2.0.md`](docs/releases/v2.0.md)（上一版：[`v1.0.md`](docs/releases/v1.0.md)）。
 
 ---
 
@@ -30,6 +39,9 @@ cp .env.example .env
 
 # 4. 起服务
 ./.venv/Scripts/python.exe -m uvicorn sentinel.main:app --port 8000 --loop asyncio
+
+# 5. 每日进展 + 每日报告（默认 fake 数据；没配 key 时报告走规则兜底）
+./.venv/Scripts/python.exe -m sentinel.cli daily --repo fastapi/fastapi
 ```
 
 打开：
@@ -58,6 +70,47 @@ curl -s -H "X-API-Key: dev-key" localhost:8000/api/v1/reports
 | `sentinel.cli digest [--id N] [--force]` | 只出报告 |
 | `sentinel.cli tick --once` | 只跑一轮调度，验证抢占与重排 |
 | `sentinel.cli list` | 列订阅与最近报告 |
+| `sentinel.cli progress [--repo R] [--id N] [--date D] [--force]` | 只生成每日进展 md（访问 GitHub，不调模型） |
+| `sentinel.cli report [--repo R] [--id N] [--date D] [--force]` | 只从已有进展生成每日报告（调模型，不访问 GitHub） |
+| `sentinel.cli daily [...]` | 上面两步连着跑 |
+
+---
+
+## 每日进展与每日报告（v2.0）
+
+```bash
+# 默认今天、全部启用订阅；--repo 可绕过订阅直接指定仓库（可重复）
+sentinel.cli progress --repo fastapi/fastapi
+sentinel.cli report   --repo fastapi/fastapi --date 2026-11-23
+sentinel.cli daily    --id 1 --force
+```
+
+产物布局（按「项目 + 日期」命名）：
+
+```
+data/daily/2026/11/fastapi__fastapi/
+├─ 2026-11-23.md          # 每日进展：front matter + 统计表 + 议题/PR 明细表
+└─ 2026-11-23-report.md   # 每日报告：一句话结论 / 关键进展 / 风险与阻塞 / 下步计划 + 附录
+```
+
+口径与约定：
+
+- **选题口径**：issues / PR 的 `updated_at` 落在当日窗口（订阅时区的自然日），
+  包含当日新建、有新活动、状态变为 `closed` / `merged` 的对象；机器人账号按订阅规则过滤。
+- **采集哪些资源**：默认 `SENTINEL_DAILY_RESOURCES=issues,pulls`。REST 客户端四种资源都已实现，
+  想要提交与发布明细就改成 `issues,pulls,commits,releases`（模板会多渲染两节）。
+- **报告章节由代码兜底**：四节缺一节就判定模型失败，改用规则模板，不会落一份内容空白的报告。
+- **幂等**：进展头里记内容指纹，同日同数据重跑不重写；报告头里记 `source_fingerprint` +
+  `source_sha256`，两者都对得上且上次不是降级产物才跳过模型调用（`--force` 强制重跑）。
+- **降级可见**：报告 front matter 的 `degraded: true` 与 `model: rules-fallback` 标明这是规则产物。
+- 每日动线**不写数据库**、不进 tick 调度：需要明确「报告日 + 时区 + 重跑」语义，先用 CLI / 外部 cron 触发。
+
+已知限制：
+
+- `--date` 回溯是「当前 `updated_at` 落在该日窗口」的查询，不是历史快照；窗口后又被更新的对象会漏。
+  默认只建议跑今天/昨天。
+- 单资源最多 `SENTINEL_DAILY_MAX_ITEMS_PER_RESOURCE` 条，超出会在文档里标 `truncated`（不是错误）。
+- 报告输入超过 `SENTINEL_REPORT_MAX_INPUT_CHARS` 会被按行截断，并在 front matter 标 `input_truncated: true`。
 
 ---
 
@@ -72,13 +125,16 @@ src/sentinel/
 ├─ config.py       pydantic-settings，SENTINEL_* 环境变量
 │
 ├─ domain/         纯领域：enums / models / dedup / filters / schedule / digest / errors
-├─ ports/          6 个 Protocol + 跨层 DTO（github / llm / notifier / renderer / clock / repositories）
+│                  / progress(每日进展) / frontmatter / report(报告契约) / completion
+├─ ports/          7 个 Protocol + 跨层 DTO（github / llm / notifier / renderer / daily / clock / repositories）
 ├─ application/    用例编排：subscription / collect / digest / notify / pipeline
-├─ infrastructure/ 端口实现：github(fake,rest) / llm(mock,openai_compat) / notify(null,smtp)
-│                  / persistence(SQLAlchemy+SQLite) / rendering(Jinja) / scheduling(APScheduler)
+│                  / daily_progress / daily_report
+├─ infrastructure/ 端口实现：github(fake,rest,mapping) / llm(mock,openai_compat) / notify(null,smtp)
+│                  / persistence(SQLAlchemy+SQLite) / rendering(Jinja + daily_store/daily_renderer)
+│                  / scheduling(APScheduler)
 └─ api/            FastAPI 路由 + 看板页面
-tests/             unit(纯函数) / integration(文件型 SQLite) / e2e(ASGITransport)
-scripts/           check_layers.py 分层守护、seed_demo
+tests/             unit(纯函数 + respx) / integration(文件型 SQLite) / e2e(ASGITransport)
+scripts/           check_layers.py 分层守护
 ```
 
 依赖方向单向向内，由 `scripts/check_layers.py` 在 CI/测试里强制：
@@ -117,6 +173,11 @@ api → application → ports → domain
 报告 `UNIQUE(subscription, period_start, period_end)` + `content_hash` 复用，重跑同一周期不重复烧 token；
 通知幂等键 `report_id:channel:target`，重发需显式 `resend`，键后追加序号，可审计不刷屏。
 
+**6. 每日动线不复用周期简报**
+每日进展是「某一天的对象清单」，不是事件流：硬塞进 `events` 表会污染 cron 窗口与去重键语义，
+所以另开 `fetch_progress()` 端口与文件产物。统计数字仍由 `domain/progress.py` 算好，
+模型只写文字；章节缺失、空内容、API 报错都退回规则模板，报告文件一定存在。
+
 ---
 
 ## 配置要点
@@ -137,7 +198,7 @@ Windows 注意：必须装 `tzdata`（已在依赖里），否则 `ZoneInfo("Asi
 ## 开发
 
 ```bash
-./.venv/Scripts/python.exe -m pytest -q            # 48 passed
+./.venv/Scripts/python.exe -m pytest -q            # 163 passed
 ./.venv/Scripts/python.exe scripts/check_layers.py # 分层检查
 ./.venv/Scripts/python.exe -m ruff check src tests # 静态检查
 ```
@@ -148,8 +209,9 @@ Windows 注意：必须装 `tzdata`（已在依赖里），否则 `ZoneInfo("Asi
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| 1 | 全链路骨架（Fake GitHub + Mock LLM + dry-run 通知） | ✅ 完成 |
-| 2 | 真实 GitHub REST：端点、映射、分页、限流退避、多 token | 待做 |
-| 3 | 真实 LLM：预压缩、分块、结构化解析、失败降级 | 待做 |
-| 4 | SMTP 实际投递 + 调度实跑 + alembic 迁移 + 多进程租约 | 待做 |
-| 5 | 看板细化（表单建订阅、筛选、分页）+ 覆盖率门槛 | 待做 |
+| 1 | 全链路骨架（Fake GitHub + Mock LLM + dry-run 通知） | ✅ 完成（v1.0） |
+| 2 | 真实 GitHub REST：端点、映射、分页、限流退避 | ✅ 完成（v2.0，四资源 + ETag + 退避） |
+| 3 | 真实 LLM：DeepSeek `deepseek-flash` 接入 + 失败降级 | ✅ 完成（v2.0） |
+| 4 | 每日进展 / 每日报告动线（手工与外部 cron 触发） | ✅ 完成（v2.0） |
+| 5 | SMTP 实际投递 + 调度实跑 + alembic 迁移 + 多进程租约 | 待做 |
+| 6 | 看板细化（表单建订阅、筛选、分页）+ 覆盖率门槛 | 待做 |
