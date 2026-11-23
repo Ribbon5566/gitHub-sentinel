@@ -3,6 +3,8 @@
 自托管的 GitHub 仓库动态哨兵：订阅仓库 → 定时增量采集 commit / issue / PR / release → AI 归纳成摘要报告 → 邮件推送 → 看板回看。
 
 v2.0 起另有一条独立的「每日动线」：按项目 + 日期落一份每日进展 Markdown，再让 DeepSeek 汇总成正式的项目每日报告。
+v3.0 在这条动线上加了**条件筛选**：给一个研发周期（`--from` / `--to`），默认只统计区间内**已合并的 PR** 与**已关闭的 Issue**，
+产出「项目研发周期报告」，用于里程碑复盘与交付说明。
 
 ```
 定时 tick(60s) → 抢占到期订阅 → 增量采集(GitHub REST) → 过滤去重(SQLite)
@@ -11,13 +13,17 @@ v2.0 起另有一条独立的「每日动线」：按项目 + 日期落一份每
 每日动线（手动 / 外部 cron 触发）：
 progress → GitHub 当日 issues/PR → data/daily/{YYYY}/{MM}/{repo}/{date}.md
 report   → 读上面的 md → deepseek-flash → ...-report.md（失败降级规则模板）
+
+研发周期动线（v3.0，同一组命令 + 区间参数）：
+progress --from A --to B → 区间内合并/关闭的对象 → .../{A}_to_{B}.md
+report   --from A --to B → 读上面的 md → .../{A}_to_{B}-report.md
 ```
 
-**当前状态：v2.0**。周期简报链路可运行（默认 Fake GitHub + Mock LLM + dry-run 通知）；
+**当前状态：v3.0**。周期简报链路可运行（默认 Fake GitHub + Mock LLM + dry-run 通知）；
 真实 GitHub REST（四资源、分页、ETag、限流退避）与 DeepSeek `deepseek-flash` 已接通，
-每日进展与每日报告落 `data/daily/`。`pytest` 163 个用例全绿，分层检查与 ruff 通过。
+每日进展、每日报告与研发周期报告落 `data/daily/`。`pytest` 251 个用例全绿，分层检查与 ruff 通过。
 
-版本变更见 [`docs/releases/v2.0.md`](docs/releases/v2.0.md)（上一版：[`v1.0.md`](docs/releases/v1.0.md)）。
+版本变更见 [`docs/releases/v3.0.md`](docs/releases/v3.0.md)（上一版：[`v2.0.md`](docs/releases/v2.0.md)、[`v1.0.md`](docs/releases/v1.0.md)）。
 
 ---
 
@@ -73,6 +79,7 @@ curl -s -H "X-API-Key: dev-key" localhost:8000/api/v1/reports
 | `sentinel.cli progress [--repo R] [--id N] [--date D] [--force]` | 只生成每日进展 md（访问 GitHub，不调模型） |
 | `sentinel.cli report [--repo R] [--id N] [--date D] [--force]` | 只从已有进展生成每日报告（调模型，不访问 GitHub） |
 | `sentinel.cli daily [...]` | 上面两步连着跑 |
+| `… --from A [--to B] [--merged] [--closed] [--activity]` | v3.0：改为按研发周期筛选（见下节），产物名带区间 |
 
 ---
 
@@ -109,8 +116,64 @@ data/daily/2026/11/fastapi__fastapi/
 
 - `--date` 回溯是「当前 `updated_at` 落在该日窗口」的查询，不是历史快照；窗口后又被更新的对象会漏。
   默认只建议跑今天/昨天。
-- 单资源最多 `SENTINEL_DAILY_MAX_ITEMS_PER_RESOURCE` 条，超出会在文档里标 `truncated`（不是错误）。
+- 单资源最多 `SENTINEL_DAILY_MAX_ITEMS_PER_RESOURCE` 条，超出后文档 front matter 标 `trimmed`——
+  只是列表少印几条，**统计仍是全量**；`truncated` 另有所指（翻页预算耗尽，统计是下界，见下节）。
 - 报告输入超过 `SENTINEL_REPORT_MAX_INPUT_CHARS` 会被按行截断，并在 front matter 标 `input_truncated: true`。
+
+---
+
+## 研发周期报告（v3.0）
+
+给一个区间，默认只回答「这段时间交付了什么」：区间内**合并的 PR** + 区间内**关闭的 Issue**。
+
+```bash
+# 默认口径：完成时间（PR 看 merged_at，Issue 看 closed_at）
+sentinel.cli daily --repo fastapi/fastapi --from 2026-11-01 --to 2026-11-15
+
+# 只要合并的 PR / 只要关闭的 Issue
+sentinel.cli progress --repo fastapi/fastapi --from 2026-11-01 --to 2026-11-15 --merged
+sentinel.cli progress --repo fastapi/fastapi --from 2026-11-01 --to 2026-11-15 --closed
+
+# 退回 v2.0 的活动口径（updated_at 落在区间即可）
+sentinel.cli progress --repo fastapi/fastapi --from 2026-11-01 --to 2026-11-15 --activity
+```
+
+`--to` 缺省为今天；`--date` 与 `--from/--to` 互斥（单日产物 `2026-11-23.md` 与区间产物是两份不同口径的文件，不能互相覆盖）。
+
+产物命名按「区间 + 口径后缀」，默认口径不加后缀：
+
+```
+data/daily/2026/11/fastapi__fastapi/
+├─ 2026-11-01_to_2026-11-15.md            # 完成口径：已合并 PR + 已关闭 Issue
+├─ 2026-11-01_to_2026-11-15-report.md     # 研发周期报告
+├─ 2026-11-01_to_2026-11-15.merged.md     # --merged：只收 PR
+├─ 2026-11-01_to_2026-11-15.closed.md     # --closed：只收 Issue
+└─ 2026-11-01_to_2026-11-15.activity.md   # --activity：活动口径
+```
+
+口径与约定：
+
+- **完成时间而非活动时间**：区间报告回答的是「交付」，所以按 `merged_at` / `closed_at` 判定是否属于本期。
+  区间之外发生的评论、推送不算本期进展——报告的提示词里也写进了这条硬约束。
+- **取数仍是 `updated_at` 倒序**：REST 的 `/pulls` 既不支持 `since` 也不支持 `state=merged`，
+  所以服务端只把 `state` 下推为 `closed`，翻页到「`updated_at` 早于区间起点」为止（`updated_at < start`
+  必然蕴含 `merged_at < start`），再在本地按 `merged_at` / `closed_at` 过滤。这样「区间内合并、之后又被评论」
+  的对象不会漏。
+- **两级截断语义**：front matter 的 `trimmed` = 展示条数到顶（数据完整，统计可信）；
+  `truncated` = 翻页预算耗尽（统计是**下界**，可能漏报）。CLI 对前者打「提示」、对后者打「警告」，
+  后者不影响退出码，避免批量任务全红。
+- **文件名按口径分开，报告口径以文件为准**：`report` 要带与进展相同的口径参数才找得到对应文件；
+  而报告**内部**用的口径从进展文件 front matter 的 `issue_axis` / `pull_axis` 读，不从本次参数读——
+  否则「先 `--merged` 出进展、再 `report --from/--to`」会生成口径混搭的报告。
+- **HTTP 接口**：`POST /api/v1/daily/period`，`scope` 取 `completion` / `activity` / `merged` / `closed`，
+  `include_report=false` 时只出进展。
+
+已知限制：
+
+- 跨度上限 `SENTINEL_REPORT_RANGE_MAX_DAYS`（默认 92 天），翻页预算 `SENTINEL_REPORT_RANGE_MAX_PAGES`
+  （默认 10 页 × 50 条）。超长区间请缩小范围或调大预算——预算打满会以 `truncated` 明确告知。
+- 提交与发布不参与「完成口径」筛选，仍按 `committed_at` / `published_at` 落在同一窗口统计，
+  且只有在 `SENTINEL_DAILY_RESOURCES` 里开出来才会采集。
 
 ---
 
@@ -126,13 +189,14 @@ src/sentinel/
 │
 ├─ domain/         纯领域：enums / models / dedup / filters / schedule / digest / errors
 │                  / progress(每日进展) / frontmatter / report(报告契约) / completion
+│                  / period(研发周期) / selection(筛选口径与谓词)
 ├─ ports/          7 个 Protocol + 跨层 DTO（github / llm / notifier / renderer / daily / clock / repositories）
 ├─ application/    用例编排：subscription / collect / digest / notify / pipeline
 │                  / daily_progress / daily_report
 ├─ infrastructure/ 端口实现：github(fake,rest,mapping) / llm(mock,openai_compat) / notify(null,smtp)
 │                  / persistence(SQLAlchemy+SQLite) / rendering(Jinja + daily_store/daily_renderer)
 │                  / scheduling(APScheduler)
-└─ api/            FastAPI 路由 + 看板页面
+└─ api/            FastAPI 路由（含 /api/v1/daily/period）+ 看板页面
 tests/             unit(纯函数 + respx) / integration(文件型 SQLite) / e2e(ASGITransport)
 scripts/           check_layers.py 分层守护
 ```
@@ -178,6 +242,14 @@ api → application → ports → domain
 所以另开 `fetch_progress()` 端口与文件产物。统计数字仍由 `domain/progress.py` 算好，
 模型只写文字；章节缺失、空内容、API 报错都退回规则模板，报告文件一定存在。
 
+**7. 区间筛选靠「服务端剪枝 + 本地谓词」**
+不在服务端做完成时间筛选（REST 根本不支持），也不引入 Search API（另一个限流域）。
+翻页剪枝三件套：`stop_before`（整体停止）、`skip_before`（左端过滤但不停页，给按 `created_at`
+排序的 releases 用）、`skip_at_or_after`（右端过滤）。完成口径只把 `state` 下推为 `closed`，
+排序键与停止键仍用 `updated_at`——若改用 `merged_at` 做停止键，「早合并、最近被评论」的对象
+会让翻页提前终止，把后面真正本期合并的 PR 全部漏掉。
+口径、谓词、排序轴、文件后缀统一由 `domain/selection.py` 一处产出，模板不许另写一套。
+
 ---
 
 ## 配置要点
@@ -198,7 +270,7 @@ Windows 注意：必须装 `tzdata`（已在依赖里），否则 `ZoneInfo("Asi
 ## 开发
 
 ```bash
-./.venv/Scripts/python.exe -m pytest -q            # 163 passed
+./.venv/Scripts/python.exe -m pytest -q            # 251 passed
 ./.venv/Scripts/python.exe scripts/check_layers.py # 分层检查
 ./.venv/Scripts/python.exe -m ruff check src tests # 静态检查
 ```
@@ -213,5 +285,6 @@ Windows 注意：必须装 `tzdata`（已在依赖里），否则 `ZoneInfo("Asi
 | 2 | 真实 GitHub REST：端点、映射、分页、限流退避 | ✅ 完成（v2.0，四资源 + ETag + 退避） |
 | 3 | 真实 LLM：DeepSeek `deepseek-flash` 接入 + 失败降级 | ✅ 完成（v2.0） |
 | 4 | 每日进展 / 每日报告动线（手工与外部 cron 触发） | ✅ 完成（v2.0） |
-| 5 | SMTP 实际投递 + 调度实跑 + alembic 迁移 + 多进程租约 | 待做 |
-| 6 | 看板细化（表单建订阅、筛选、分页）+ 覆盖率门槛 | 待做 |
+| 5 | 条件筛选：研发周期报告（完成口径 + CLI/API + 区间命名） | ✅ 完成（v3.0） |
+| 6 | SMTP 实际投递 + 调度实跑 + alembic 迁移 + 多进程租约 | 待做 |
+| 7 | 看板细化（表单建订阅、筛选、分页）+ 覆盖率门槛 | 待做 |
