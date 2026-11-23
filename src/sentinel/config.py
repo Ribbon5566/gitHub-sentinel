@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # 基础
     env: str = "dev"
     app_name: str = "GitHub Sentinel"
-    version: str = "0.1.0"
+    version: str = "1.0.0"
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
