@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ report.title }}</title>
+<style>
+  :root { --ink:#1a1d21; --muted:#6b7280; --line:#e5e7eb; --accent:#1f6feb; --bg:#ffffff; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:32px 16px; background:#f4f5f7; color:var(--ink);
+         font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; line-height:1.65; }
+  .sheet { max-width: 880px; margin:0 auto; background:var(--bg); border:1px solid var(--line);
+           border-radius:14px; padding:40px 44px; }
+  .kicker { font-family: ui-monospace, Consolas, monospace; font-size:12px; letter-spacing:.08em;
+            text-transform:uppercase; color:var(--accent); }
+  h1 { font-size:26px; line-height:1.35; margin:10px 0 8px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .stats { display:flex; gap:12px; margin:26px 0 8px; flex-wrap:wrap; }
+  .stat { flex:1 1 120px; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--muted); font-size:12px; }
+  h2 { font-size:16px; margin:30px 0 10px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+  .md p { margin:0 0 12px; }
+  .md ul { margin:0 0 12px; padding-left:20px; }
+  .md blockquote { margin:0 0 12px; padding:8px 14px; background:#f7f8fa; border-left:3px solid var(--line);
+                   color:var(--muted); }
+  .md code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:12px; }
+  ul.highlights { padding-left:20px; }
+  ul.highlights li { margin-bottom:7px; }
+  .risks { background:#fff8f0; border:1px solid #f5d6b3; border-radius:10px; padding:14px 18px; margin-top:18px; }
+  .risks h2 { border:none; margin:0 0 8px; font-size:14px; color:#a15c00; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:600; border-bottom:1px solid var(--line);
+       padding:8px 6px; }
+  td { border-bottom:1px solid #f0f1f3; padding:8px 6px; vertical-align:top; }
+  .kind { display:inline-block; padding:1px 7px; border-radius:999px; background:#eef2ff; color:#3730a3;
+          font-size:11px; white-space:nowrap; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .excerpt { color:var(--muted); font-size:12px; }
+  footer { margin-top:34px; padding-top:14px; border-top:1px solid var(--line); color:var(--muted);
+           font-size:12px; }
+  @media print { body { background:#fff; padding:0; } .sheet { border:none; padding:0; } }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <div class="kicker">{{ sub.repo_full_name }}</div>
+  <h1>{{ report.headline or report.title }}</h1>
+  <div class="meta">
+    周期 {{ period_label }} · 生成于 {{ generated_at|dt }} · 摘要模型 {{ report.model or "mock" }}
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b>{{ stats.commits or 0 }}</b><span>提交</span></div>
+    <div class="stat"><b>{{ stats.issues or 0 }}</b><span>议题</span></div>
+    <div class="stat"><b>{{ stats.pull_requests or 0 }}</b><span>合并请求</span></div>
+    <div class="stat"><b>{{ stats.releases or 0 }}</b><span>发布</span></div>
+    <div class="stat"><b>{{ stats.contributors or 0 }}</b><span>贡献者</span></div>
+  </div>
+
+  <h2>摘要</h2>
+  <div class="md">{{ summary.overview_md|md }}</div>
+
+  {% if summary.highlights %}
+  <h2>要点</h2>
+  <ul class="highlights">
+    {% for item in summary.highlights %}<li>{{ item }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if summary.risks %}
+  <div class="risks">
+    <h2>需要关注</h2>
+    <ul class="highlights">
+      {% for item in summary.risks %}<li>{{ item }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <h2>事件明细（{{ report.event_count }} 条，展示前 {{ events|length }} 条）</h2>
+  {% if events %}
+  <table>
+    <thead><tr><th style="width:74px">类型</th><th>标题</th><th style="width:90px">作者</th><th style="width:110px">时间</th></tr></thead>
+    <tbody>
+      {% for event in events %}
+      <tr>
+        <td><span class="kind">{{ event.kind|kind_label }}</span></td>
+        <td>
+          {% if event.url %}<a href="{{ event.url }}" target="_blank" rel="noopener">{{ event.title }}</a>
+          {% else %}{{ event.title }}{% endif %}
+          {% if event.body_excerpt %}<div class="excerpt">{{ event.body_excerpt }}</div>{% endif %}
+        </td>
+        <td>{{ event.author or "-" }}</td>
+        <td>{{ event.authored_at|dt("%m-%d %H:%M") }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="excerpt">本周期没有符合条件的事件。</p>
+  {% endif %}
+
+  <footer>
+    由 GitHub Sentinel 自动生成 · {{ sub.repo_full_name }} · 订阅 #{{ sub.id }} ·
+    下一次 {{ sub.next_run_at|dt }}
+  </footer>
+</div>
+</body>
+</html>

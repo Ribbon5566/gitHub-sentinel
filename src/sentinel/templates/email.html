@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>{{ subject }}</title></head>
+<body style="margin:0;padding:0;background:#f4f5f7;">
+  <!-- 邮件用表格布局 + 内联样式：Outlook / 企业邮箱对 flex、grid、head 内样式支持极差 -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f7;padding:24px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0"
+               style="width:640px;max-width:96%;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;">
+          <tr>
+            <td style="padding:28px 32px 8px 32px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;">
+              <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#1f6feb;font-family:Consolas,monospace;">
+                {{ sub.repo_full_name }}
+              </div>
+              <h1 style="margin:10px 0 6px 0;font-size:22px;line-height:1.4;color:#1a1d21;">
+                {{ report.headline or report.title }}
+              </h1>
+              <div style="font-size:13px;color:#6b7280;">
+                {{ period_label }} · 共 {{ report.event_count }} 条更新 · 摘要模型 {{ report.model or "mock" }}
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 32px 0 32px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="border:1px solid #e5e7eb;border-radius:8px;">
+                <tr>
+                  <td align="center" style="padding:12px 0;font-size:13px;color:#6b7280;">
+                    提交 <b style="color:#1a1d21;">{{ stats.commits or 0 }}</b> ·
+                    议题 <b style="color:#1a1d21;">{{ stats.issues or 0 }}</b> ·
+                    PR <b style="color:#1a1d21;">{{ stats.pull_requests or 0 }}</b> ·
+                    发布 <b style="color:#1a1d21;">{{ stats.releases or 0 }}</b> ·
+                    贡献者 <b style="color:#1a1d21;">{{ stats.contributors or 0 }}</b>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:18px 32px 0 32px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:14px;line-height:1.7;color:#1a1d21;">
+              {{ summary.overview_md|md }}
+            </td>
+          </tr>
+          {% if summary.highlights %}
+          <tr>
+            <td style="padding:8px 32px 0 32px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;">
+              <div style="font-size:13px;font-weight:600;color:#1a1d21;margin-bottom:8px;">本期要点</div>
+              <ul style="margin:0;padding-left:20px;font-size:14px;line-height:1.7;color:#1a1d21;">
+                {% for item in summary.highlights %}<li style="margin-bottom:6px;">{{ item }}</li>{% endfor %}
+              </ul>
+            </td>
+          </tr>
+          {% endif %}
+          {% if summary.risks %}
+          <tr>
+            <td style="padding:16px 32px 0 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="background:#fff8f0;border:1px solid #f5d6b3;border-radius:8px;">
+                <tr>
+                  <td style="padding:12px 16px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;line-height:1.7;color:#8a4b00;">
+                    <b>需要关注</b>
+                    <ul style="margin:6px 0 0 0;padding-left:18px;">
+                      {% for item in summary.risks %}<li>{{ item }}</li>{% endfor %}
+                    </ul>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          {% endif %}
+          <tr>
+            <td style="padding:22px 32px 28px 32px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;font-size:12px;color:#6b7280;border-top:1px solid #e5e7eb;">
+              由 GitHub Sentinel 自动生成 · 订阅 #{{ sub.id }} · 下一次 {{ sub.next_run_at|dt }}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

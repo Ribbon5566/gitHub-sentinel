@@ -1,0 +1,19 @@
+{{ report.title }}
+{{ "=" * 56 }}
+仓库: {{ sub.repo_full_name }}
+周期: {{ period_label }}
+共 {{ report.event_count }} 条更新 · 模型 {{ report.model or "mock" }}
+
+{{ report.headline }}
+
+{{ summary.overview_md }}
+
+{% if summary.highlights %}本期要点
+{% for item in summary.highlights %}* {{ item }}
+{% endfor %}
+{% endif %}{% if summary.risks %}需要关注
+{% for item in summary.risks %}! {{ item }}
+{% endfor %}
+{% endif %}
+-- 
+GitHub Sentinel · 订阅 #{{ sub.id }} · 下一次 {{ sub.next_run_at|dt }}

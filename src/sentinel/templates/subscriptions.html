@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}订阅 · GitHub Sentinel{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <h2>订阅列表</h2>
+    <span class="muted">{{ subs|length }} 条</span>
+  </div>
+  {% if subs %}
+  <table>
+    <thead>
+      <tr><th>仓库</th><th>节奏</th><th>关注</th><th>下次运行</th><th>上次采集</th><th>状态</th></tr>
+    </thead>
+    <tbody>
+      {% for sub in subs %}
+      <tr>
+        <td>
+          <div class="repo">{{ sub.display_name }}</div>
+          <div class="mono muted small">{{ sub.repo_full_name }}</div>
+        </td>
+        <td class="mono nowrap">{{ sub.cron }}<div class="muted small">{{ sub.timezone }}</div></td>
+        <td class="small">
+          {% for kind in sub.watch|sort %}{{ kind|kind_label }}{% if not loop.last %} · {% endif %}{% endfor %}
+        </td>
+        <td class="nowrap">{{ sub.next_run_at|dt }}</td>
+        <td class="nowrap muted">{{ sub.last_collected_at|dt }}</td>
+        <td>
+          {% if sub.enabled %}<span class="badge badge-success">启用</span>
+          {% else %}<span class="badge badge-failed">停用</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">
+    还没有订阅。用 API 新建：
+    <code>curl -X POST -H "X-API-Key: dev-key" -H "Content-Type: application/json"
+      -d '{"repo_full_name":"fastapi/fastapi","cron":"0 9 * * *"}' localhost:8000/api/v1/subscriptions</code>
+  </p>
+  {% endif %}
+</section>
+{% endblock %}

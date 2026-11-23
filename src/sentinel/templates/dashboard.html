@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}总览 · GitHub Sentinel{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <div>
+    <h1>仓库动态，按时送达</h1>
+    <p>订阅 GitHub 仓库，按 cron 增量采集 commit / issue / PR / release，AI 归纳成摘要报告并推送。</p>
+  </div>
+  <div class="hero-actions">
+    <a class="btn" href="/docs">用 API 新建订阅</a>
+    <a class="btn ghost" href="/subscriptions">查看全部订阅</a>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="stat"><span class="stat-value">{{ counts.subscriptions }}</span><span class="stat-label">订阅</span></div>
+  <div class="stat"><span class="stat-value">{{ counts.active }}</span><span class="stat-label">启用中</span></div>
+  <div class="stat"><span class="stat-value">{{ counts.reports }}</span><span class="stat-label">报告</span></div>
+  <div class="stat"><span class="stat-value">{{ counts.runs }}</span><span class="stat-label">采集运行</span></div>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2>最近报告</h2>
+    <span class="muted">{{ reports|length }} 份</span>
+  </div>
+  {% if reports %}
+  <table>
+    <thead><tr><th>报告</th><th>仓库</th><th>周期</th><th>事件</th><th>生成时间</th></tr></thead>
+    <tbody>
+      {% for report in reports %}
+      <tr>
+        <td><a href="/reports/{{ report.id }}">{{ report.title or report.headline }}</a></td>
+        <td class="mono">{{ report.repo_full_name }}</td>
+        <td class="nowrap">{{ report.period_start|dt("%m-%d %H:%M") }} → {{ report.period_end|dt("%m-%d %H:%M") }}</td>
+        <td>{{ report.event_count }}</td>
+        <td class="nowrap muted">{{ report.created_at|dt }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">还没有报告。先建一条订阅，然后点「立即检查」，或用 API <code>POST /api/v1/subscriptions/{id}/digest</code>。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>最近采集</h2></div>
+  {% if runs %}
+  <table>
+    <thead><tr><th>#</th><th>仓库</th><th>状态</th><th>新增</th><th>去重跳过</th><th>304</th><th>开始时间</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td class="muted">{{ run.id }}</td>
+        <td class="mono">{{ run.repo_full_name }}</td>
+        <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
+        <td>{{ run.inserted }}</td>
+        <td>{{ run.skipped }}</td>
+        <td>{{ run.not_modified }}</td>
+        <td class="nowrap muted">{{ run.started_at|dt }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">还没有采集记录。</p>
+  {% endif %}
+</section>
+{% endblock %}

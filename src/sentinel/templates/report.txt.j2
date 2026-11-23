@@ -1,0 +1,33 @@
+{{ report.title }}
+{{ "=" * 60 }}
+仓库: {{ sub.repo_full_name }}
+周期: {{ period_label }}
+生成: {{ generated_at|dt }}    模型: {{ report.model or "mock" }}
+
+统计: 提交 {{ stats.commits or 0 }} · 议题 {{ stats.issues or 0 }} · PR {{ stats.pull_requests or 0 }} · 发布 {{ stats.releases or 0 }} · 贡献者 {{ stats.contributors or 0 }}
+
+{{ report.headline }}
+{{ "-" * 60 }}
+
+{{ summary.overview_md }}
+
+{% if summary.highlights %}
+要点
+----
+{% for item in summary.highlights %}* {{ item }}
+{% endfor %}
+{% endif %}
+{% if summary.risks %}
+需要关注
+--------
+{% for item in summary.risks %}! {{ item }}
+{% endfor %}
+{% endif %}
+事件明细（{{ report.event_count }} 条，展示前 {{ events|length }} 条）
+------------------------------------------------------------
+{% for event in events %}[{{ event.kind|kind_label }}] {{ event.title }}{% if event.author %} — {{ event.author }}{% endif %}（{{ event.authored_at|dt("%m-%d %H:%M") }}）
+{% if event.url %}    {{ event.url }}
+{% endif %}{% endfor %}
+
+-- 
+GitHub Sentinel · 订阅 #{{ sub.id }} · 下一次 {{ sub.next_run_at|dt }}
