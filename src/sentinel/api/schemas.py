@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Annotated, Generic, TypeVar
+from datetime import date, datetime
+from typing import Annotated, Generic, Literal, TypeVar
 
 from fastapi import Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -176,3 +176,39 @@ class NotifyResultOut(BaseModel):
     status: str
     detail: str = ""
     skipped: bool = False
+
+
+class PeriodReportRequest(BaseModel):
+    """研发周期报告入参。
+
+    用 `scope` 一个枚举表达 CLI 上 `--merged/--closed/--activity` 的组合：
+    四个取值覆盖「完成口径 / 活动口径 / 只要 PR / 只要议题」，
+    比三个互斥布尔量更不容易被调用方传成非法组合。
+    """
+
+    repo_full_name: str
+    date_from: date
+    date_to: date | None = Field(default=None, description="含当天，缺省为今天")
+    scope: Literal["completion", "activity", "merged", "closed"] = "completion"
+    repo_title: str | None = None
+    force: bool = False
+    include_report: bool = True
+
+
+class PeriodReportOut(BaseModel):
+    repo_full_name: str
+    period_label: str
+    scope: str
+    scope_label: str
+    criteria: list[str] = Field(default_factory=list)
+    progress_path: str
+    progress_reused: bool = False
+    item_count: int = 0
+    stats: dict[str, int] = Field(default_factory=dict)
+    trimmed: list[str] = Field(default_factory=list)
+    truncated: list[str] = Field(default_factory=list)
+    report_path: str | None = None
+    report_reused: bool = False
+    report_model: str | None = None
+    report_degraded: bool = False
+

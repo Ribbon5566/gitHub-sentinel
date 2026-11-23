@@ -44,6 +44,72 @@ _STAT_LABELS: tuple[tuple[str, str], ...] = (
     ("contributors", "参与贡献者"),
 )
 
+# 完成口径只讲「本期交付了什么」，不再罗列未关闭/草稿这类活动口径的指标
+_COMPLETION_STAT_LABELS: tuple[tuple[str, str], ...] = (
+    ("issues_closed", "议题（区间内关闭）"),
+    ("pulls_merged", "合并请求（区间内合并）"),
+    ("commits_total", "代码提交"),
+    ("releases_total", "版本发布"),
+    ("contributors", "参与贡献者"),
+)
+
+
+def stat_labels(completion: bool) -> tuple[tuple[str, str], ...]:
+    """统计表与提示词共用一份标签：两处各写一套必然漂移。"""
+    return _COMPLETION_STAT_LABELS if completion else _STAT_LABELS
+
+
+def progress_headings(completion: bool, stats: Mapping[str, int]) -> dict[str, str]:
+    """进展文档的小节标题与空表占位文案。
+
+    完成口径不能写「本日 N 个议题有更新」——那些对象本来就已经关闭了。
+    """
+    if completion:
+        return {
+            "issue_heading": f"议题（{stats.get('issues_closed', 0)} 条已关闭）",
+            "pull_heading": f"合并请求（{stats.get('pulls_merged', 0)} 条已合并）",
+            "commit_heading": f"代码提交（{stats.get('commits_total', 0)} 次）",
+            "release_heading": f"版本发布（{stats.get('releases_total', 0)} 个）",
+            "empty_issue": "区间内没有关闭的议题",
+            "empty_pull": "区间内没有合并的 PR",
+            "empty_commit": "区间内没有提交",
+            "empty_release": "区间内没有发布",
+            "issue_time_header": "关闭",
+            "pull_time_header": "合并",
+        }
+    return {
+        "issue_heading": f"议题（{stats.get('issues_total', 0)} 条有更新）",
+        "pull_heading": f"合并请求（{stats.get('pulls_total', 0)} 条有更新）",
+        "commit_heading": f"代码提交（{stats.get('commits_total', 0)} 次）",
+        "release_heading": f"版本发布（{stats.get('releases_total', 0)} 个）",
+        "empty_issue": "本日无议题更新",
+        "empty_pull": "本日无 PR 更新",
+        "empty_commit": "本日无提交",
+        "empty_release": "本日无发布",
+        "issue_time_header": "更新",
+        "pull_time_header": "更新",
+    }
+
+
+def report_system_prompt(*, period: bool = False, scope_note: str = "") -> str:
+    """按日报 / 周期报告切换首句，并追加口径硬约束。
+
+    章节契约（REPORT_SECTIONS 与 normalize_report_body）完全不动：
+    改动它会连带改兜底逻辑，收益远小于风险。
+    """
+    if not period and not scope_note:
+        return REPORT_SYSTEM_PROMPT
+    lead = (
+        "你是一名研发负责人，正在向管理层提交项目研发周期报告。"
+        if period
+        else "你是一名研发负责人，正在向管理层提交项目每日报告。"
+    )
+    rest = REPORT_SYSTEM_PROMPT.split("\n", 1)[1]
+    text = f"{lead}\n{rest}"
+    if scope_note:
+        text += f"\n8. {scope_note}"
+    return text
+
 _SECTION_START = re.compile(r"^\s*<!--\s*section:([a-z_]+):begin\s*-->\s*$")
 _SECTION_END = re.compile(r"^\s*<!--\s*section:([a-z_]+):end\s*-->\s*$")
 _HEADING = re.compile(r"^(#{1,6})\s*(.+?)\s*$")
@@ -157,23 +223,33 @@ def build_report_user_prompt(
     risks: tuple[str, ...],
     progress_md: str,
     truncated: bool,
+    period_label: str = "",
+    scope_label: str = "",
+    completion: bool = False,
 ) -> str:
     """报告提示词与四章节契约放在同一个文件：改章节就必须同时改提示词。"""
     stat_line = " · ".join(
-        f"{label} {stats[key]}" for key, label in _STAT_LABELS if stats.get(key) is not None
+        f"{label} {stats[key]}" for key, label in stat_labels(completion) if stats.get(key) is not None
     )
     hints = "\n".join(f"- {item}" for item in highlights) or "- 无"
     risk_hints = "\n".join(f"- {item}" for item in risks) or "- 无"
     truncated_note = (
         "\n注意：进展明细因过长被截断，不要推测未出现的条目。\n" if truncated else ""
     )
+    when = (
+        f"报告周期：{period_label}（{timezone}）"
+        if period_label
+        else f"报告日期：{day:%Y-%m-%d}（{timezone}）"
+    )
+    scope_line = f"\n口径：{scope_label}" if scope_label else ""
+    progress_title = "项目进展 Markdown" if period_label else "每日进展 Markdown"
     return (
         f"项目：{repo_title}（{repo_full_name}）\n"
-        f"报告日期：{day:%Y-%m-%d}（{timezone}）\n"
+        f"{when}{scope_line}\n"
         f"统计摘要：{stat_line}\n\n"
         f"规则线索（仅用于定位重点，不要直接复制）：\n{hints}\n\n"
         f"规则识别的风险点（请判断是否需要保留，不要机械照抄）：\n{risk_hints}\n\n"
-        f"每日进展 Markdown：\n\n{progress_md}\n"
+        f"{progress_title}：\n\n{progress_md}\n"
         f"{truncated_note}\n"
         "请按系统提示的四个二级标题输出正文，不要输出附录、表格或一级标题。"
     )

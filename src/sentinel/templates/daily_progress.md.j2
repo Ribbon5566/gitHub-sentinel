@@ -1,4 +1,4 @@
-# {{ ctx.repo_title }} 每日进展 · {{ day_label }}
+# {{ ctx.repo_title }} {{ ctx.report_kind_label }} · {{ day_label }}
 
 > {{ ctx.summary }}
 
@@ -6,45 +6,40 @@
 
 | 指标 | 数量 |
 |---|---:|
-| 议题（当日有更新） | {{ s.issues_total }} |
-| 议题已关闭 | {{ s.issues_closed }} |
-| 合并请求（当日有更新） | {{ s.pulls_total }} |
-| 合并请求已合并 | {{ s.pulls_merged }} |
-| 合并请求草稿 | {{ s.pulls_draft }} |
-| 代码提交 | {{ s.commits_total }} |
-| 版本发布 | {{ s.releases_total }} |
-| 参与贡献者 | {{ s.contributors }} |
+{% for label, value in stat_rows %}
+| {{ label }} | {{ value }} |
+{% endfor %}
 
 {% if 'issues' in resources %}
-## 议题（{{ s.issues_total }} 条有更新）
+## {{ labels.issue_heading }}
 
 <!-- section:issues:begin -->
-| # | 标题 | 状态 | 作者 | 标签 | 更新 | 摘要 |
+| # | 标题 | 状态 | 作者 | 标签 | {{ labels.issue_time_header }} | 摘要 |
 |---:|---|---|---|---|---|---|
 {% for item in ctx.issues %}
-| [#{{ item.number }}]({{ item.url }}) | {{ item.title|cell(60) }} | {{ item.state }} | {{ item.author }} | {{ item.labels|join('、') or '—' }} | {{ item.updated_at|dt }} | {{ item.body_excerpt|cell(60) or '—' }} |
+| [#{{ item.number }}]({{ item.url }}) | {{ item.title|cell(60) }} | {{ item.state }} | {{ item.author }} | {{ item.labels|join('、') or '—' }} | {{ item|attr(ctx.issue_axis_attr)|dt }} | {{ item.body_excerpt|cell(60) or '—' }} |
 {% else %}
-| — | 本日无议题更新 | — | — | — | — | — |
+| — | {{ labels.empty_issue }} | — | — | — | — | — |
 {% endfor %}
 <!-- section:issues:end -->
 {% endif %}
 {% if 'pulls' in resources %}
 
-## 合并请求（{{ s.pulls_total }} 条有更新）
+## {{ labels.pull_heading }}
 
 <!-- section:pulls:begin -->
-| # | 标题 | 状态 | 作者 | 变更 | 更新 | 摘要 |
+| # | 标题 | 状态 | 作者 | 变更 | {{ labels.pull_time_header }} | 摘要 |
 |---:|---|---|---|---|---|---|
 {% for item in ctx.pulls %}
-| [#{{ item.number }}]({{ item.url }}) | {{ item.title|cell(60) }} | {{ item.status_label }} | {{ item.author }} | {{ item.additions|delta(item.deletions, item.changed_files) }} | {{ item.updated_at|dt }} | {{ item.body_excerpt|cell(60) or '—' }} |
+| [#{{ item.number }}]({{ item.url }}) | {{ item.title|cell(60) }} | {{ item.status_label }} | {{ item.author }} | {{ item.additions|delta(item.deletions, item.changed_files) }} | {{ item|attr(ctx.pull_axis_attr)|dt }} | {{ item.body_excerpt|cell(60) or '—' }} |
 {% else %}
-| — | 本日无 PR 更新 | — | — | — | — | — |
+| — | {{ labels.empty_pull }} | — | — | — | — | — |
 {% endfor %}
 <!-- section:pulls:end -->
 {% endif %}
 {% if 'commits' in resources %}
 
-## 代码提交（{{ s.commits_total }} 次）
+## {{ labels.commit_heading }}
 
 <!-- section:commits:begin -->
 | SHA | 标题 | 作者 | 时间 |
@@ -52,13 +47,13 @@
 {% for item in ctx.commits %}
 | [{{ item.sha[:7] }}]({{ item.url }}) | {{ item.title|cell(60) }} | {{ item.author }} | {{ item.committed_at|dt }} |
 {% else %}
-| — | 本日无提交 | — | — |
+| — | {{ labels.empty_commit }} | — | — |
 {% endfor %}
 <!-- section:commits:end -->
 {% endif %}
 {% if 'releases' in resources %}
 
-## 版本发布（{{ s.releases_total }} 个）
+## {{ labels.release_heading }}
 
 <!-- section:releases:begin -->
 | Tag | 名称 | 类型 | 发布时间 | 摘要 |
@@ -66,17 +61,23 @@
 {% for item in ctx.releases %}
 | [{{ item.tag }}]({{ item.url }}) | {{ item.name|cell(40) or item.tag }} | {{ '预发布' if item.prerelease else '正式' }} | {{ item.published_at|dt }} | {{ item.body_excerpt|cell(60) or '—' }} |
 {% else %}
-| — | 本日无发布 | — | — | — |
+| — | {{ labels.empty_release }} | — | — | — |
 {% endfor %}
 <!-- section:releases:end -->
 {% endif %}
 
 ## 数据口径
 
+{% if ctx.criteria %}
+{% for line in ctx.criteria %}
+- {{ line }}
+{% endfor %}
+{% else %}
 - 议题 / PR：`updated_at` 落在 {{ window_start_label }} ~ {{ window_end_label }}（{{ ctx.timezone }}）；
   包含当日新建、有新活动、状态变为 `closed` / `merged` 的对象。
+{% endif %}
 - 提交按 `committed_at`、发布按 `published_at` 落在同一窗口。
-- 单资源最多展示 {{ max_items }} 条{% if truncated %}；本次被截断的资源：{{ truncated }}{% endif %}。
+- 单资源最多展示 {{ max_items }} 条{% if truncated %}；本次触及翻页预算的资源：{{ truncated }}（统计为下界）{% endif %}{% if ctx.trimmed %}；因展示上限未列出的资源：{{ trimmed }}（统计仍按全量）{% endif %}。
 - 机器人账号已过滤 {{ s.bots_filtered }} 条（`SENTINEL_DAILY_SKIP_BOTS` 控制）。
-- 数据源是 GitHub 的当前状态接口，历史日期回溯只能保证「当前时间戳落在当日」，不是严格历史快照。
+- 数据源是 GitHub 的当前状态接口，历史日期回溯只能保证「当前时间戳落在{{ '区间内' if ctx.date_from else '当日' }}」，不是严格历史快照。
 - 本文档由 `sentinel progress` 生成于 {{ generated_label }}，指纹 `{{ ctx.fingerprint }}`。

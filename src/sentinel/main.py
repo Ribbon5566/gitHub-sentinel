@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api.routers import activity, collect, health, pages, reports, subscriptions
+from .api.routers import activity, collect, daily, health, pages, reports, subscriptions
 from .config import Settings, load_settings
 from .container import Container
 from .domain.errors import (
@@ -32,6 +32,7 @@ GitHub Sentinel 的 HTTP 接口。
 - 订阅管理：`/api/v1/subscriptions`
 - 采集与摘要：`POST /api/v1/subscriptions/{id}/collect`、`POST /api/v1/subscriptions/{id}/digest`
 - 报告：`/api/v1/reports`
+- 研发周期报告：`POST /api/v1/daily/period`
 - 运行记录：`/api/v1/runs`
 
 鉴权：请求头 `X-API-Key`。未配置 `SENTINEL_API_KEY` 时仅允许本机访问。
@@ -94,6 +95,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(collect.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(activity.router, prefix="/api/v1")
+    app.include_router(daily.router, prefix="/api/v1")
     app.include_router(pages.router)
     return app
 

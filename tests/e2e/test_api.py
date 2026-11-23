@@ -150,3 +150,126 @@ async def test_dashboard_requires_login_then_renders(api) -> None:
     assert page.status_code == 200
     assert "GitHub" in page.text
     assert "最近报告" in page.text
+
+
+# ------------------------------------------------- v3.0 研发周期报告接口
+PERIOD_BODY = {
+    "repo_full_name": "acme/widgets",
+    "date_from": "2026-11-01",
+    "date_to": "2026-11-15",
+    "scope": "completion",
+}
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    """冻住时钟：区间终点必须落在「今天」之前，否则会被 422 挡掉。"""
+
+    def apply(container) -> datetime:
+        moment = datetime(2026, 11, 23, 8, 41, 30, tzinfo=UTC)
+        monkeypatch.setattr(container.clock, "now", lambda: moment)
+        return moment
+
+    return apply
+
+
+async def test_period_report_writes_progress_and_report(api, frozen_clock) -> None:
+    client, container = api
+    frozen_clock(container)
+
+    response = await client.post("/api/v1/daily/period", json=PERIOD_BODY, headers=HEADERS)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    assert payload["period_label"] == "2026-11-01 ~ 2026-11-15"
+    assert payload["scope"] == "completion"
+    assert "完成口径" in payload["scope_label"]
+    assert payload["progress_path"].endswith("2026-11-01_to_2026-11-15.md")
+    assert payload["report_path"].endswith("2026-11-01_to_2026-11-15-report.md")
+    # 完成口径的统计必须只有交付类指标
+    assert "issues_closed" in payload["stats"]
+    assert payload["stats"]["pulls_merged"] >= 1
+    assert any("closed_at" in line for line in payload["criteria"])
+    # mock 模型不支持自由文本，走规则兜底；接口要把这件事如实告诉调用方
+    assert payload["report_model"] == "rules-fallback"
+    assert payload["report_degraded"] is True
+
+
+async def test_period_report_can_skip_llm(api, frozen_clock) -> None:
+    client, container = api
+    frozen_clock(container)
+
+    response = await client.post(
+        "/api/v1/daily/period",
+        json={**PERIOD_BODY, "include_report": False},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["report_path"] is None
+    assert payload["progress_path"].endswith(".md")
+
+
+async def test_period_report_scope_merged_uses_own_file(api, frozen_clock) -> None:
+    """不同口径必须落不同文件，否则两份交付清单会互相覆盖。"""
+    client, container = api
+    frozen_clock(container)
+
+    response = await client.post(
+        "/api/v1/daily/period",
+        json={**PERIOD_BODY, "scope": "merged", "include_report": False},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["progress_path"].endswith("2026-11-01_to_2026-11-15.merged.md")
+    assert payload["scope_label"] == "完成口径（PR `merged_at`）"
+    # 只要 PR 时不该再有议题口径说明
+    assert all("议题" not in line for line in payload["criteria"])
+
+
+async def test_period_report_is_idempotent(api, frozen_clock) -> None:
+    """同一份数据重复调用应复用进展文件，不重复写盘、不重复调模型。"""
+    client, container = api
+    frozen_clock(container)
+
+    first = await client.post("/api/v1/daily/period", json=PERIOD_BODY, headers=HEADERS)
+    second = await client.post("/api/v1/daily/period", json=PERIOD_BODY, headers=HEADERS)
+    assert second.status_code == 200, second.text
+    assert second.json()["progress_reused"] is True
+    assert second.json()["progress_path"] == first.json()["progress_path"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"date_from": "2026-11-15", "date_to": "2026-11-01"}, "晚于"),
+        ({"date_to": "2030-01-01"}, "还没到"),
+        ({"date_from": "2020-01-01", "date_to": "2026-11-01"}, "超过上限"),
+    ],
+)
+async def test_period_report_rejects_bad_range(api, frozen_clock, overrides, fragment) -> None:
+    client, container = api
+    frozen_clock(container)
+
+    response = await client.post(
+        "/api/v1/daily/period", json={**PERIOD_BODY, **overrides}, headers=HEADERS
+    )
+    assert response.status_code == 422
+    assert fragment in response.json()["detail"]
+
+
+async def test_period_report_rejects_unknown_scope(api, frozen_clock) -> None:
+    client, container = api
+    frozen_clock(container)
+
+    response = await client.post(
+        "/api/v1/daily/period", json={**PERIOD_BODY, "scope": "opened"}, headers=HEADERS
+    )
+    assert response.status_code == 422
+
+
+async def test_period_report_requires_key(api) -> None:
+    client, _ = api
+    response = await client.post("/api/v1/daily/period", json=PERIOD_BODY)
+    assert response.status_code == 401

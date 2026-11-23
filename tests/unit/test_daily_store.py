@@ -95,3 +95,40 @@ def test_daily_root_outside_data_dir_returns_absolute_path(tmp_path) -> None:
     store = FileDailyStore(daily_root=tmp_path / "elsewhere", data_dir=tmp_path / "data")
     relative = store.write_progress(repo_full_name="a/b", day=DAY, content=PROGRESS)
     assert relative.startswith(str((tmp_path / "elsewhere").resolve()).replace("\\", "/"))
+
+
+def test_stem_overrides_only_the_file_name(store) -> None:
+    """目录仍按报告日归档，文件名交给调用方——两套口径才不会抢同一个文件。"""
+    relative = store.write_progress(
+        repo_full_name="fastapi/fastapi",
+        day=DAY,
+        content=PROGRESS,
+        stem="2026-11-01_to_2026-11-15",
+    )
+    assert relative == "daily/2026/11/fastapi__fastapi/2026-11-01_to_2026-11-15.md"
+    doc = store.read_progress("fastapi/fastapi", DAY, stem="2026-11-01_to_2026-11-15")
+    assert doc is not None
+    assert doc.relative_path == relative
+
+
+def test_report_stem_keeps_default_suffix(store) -> None:
+    relative = store.write_report(
+        repo_full_name="fastapi/fastapi",
+        day=DAY,
+        content="---\nrepo: fastapi/fastapi\ndegraded: false\n---\n\n# 报告\n",
+        stem="2026-11-01_to_2026-11-15.merged",
+    )
+    assert relative.endswith("2026-11-01_to_2026-11-15.merged-report.md")
+    assert (
+        store.read_report("fastapi/fastapi", DAY, stem="2026-11-01_to_2026-11-15.merged")
+        is not None
+    )
+
+
+def test_read_progress_backfills_period_from_front_matter(store) -> None:
+    content = PROGRESS.replace("date: 2026-11-23", "date: 2026-11-15\ndate_from: 2026-11-01")
+    store.write_progress(repo_full_name="fastapi/fastapi", day=DAY, content=content, stem="p")
+    doc = store.read_progress("fastapi/fastapi", DAY, stem="p")
+    assert doc is not None
+    assert doc.date_from == date(2026, 11, 1)
+    assert doc.date_to == date(2026, 11, 15)

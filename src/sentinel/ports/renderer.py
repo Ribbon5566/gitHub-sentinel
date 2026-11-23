@@ -61,6 +61,15 @@ class DailyProgressContext:
     risks: tuple[str, ...]
     summary: str
     max_items: int
+    # 以下字段都带默认值：单日渲染不需要传，模板回落到 v2.0 的文案
+    date_from: date | None = None
+    period_label: str = ""
+    report_kind_label: str = "每日进展"
+    scope_completion: bool = False
+    issue_axis_attr: str = "updated_at"
+    pull_axis_attr: str = "updated_at"
+    criteria: tuple[str, ...] = ()
+    trimmed: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +81,8 @@ class DailyReportContext:
     stats: Mapping[str, int]
     highlights: tuple[str, ...]
     risks: tuple[str, ...]
+    period_label: str = ""
+    scope_completion: bool = False
 
 
 class ReportRendererPort(Protocol):

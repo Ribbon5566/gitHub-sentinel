@@ -192,17 +192,24 @@ class FakeGitHub:
 
     # ------------------------------------------------------------- 每日进展
     async def fetch_progress(self, query: ProgressQuery) -> ProgressResult:
-        """按「仓库 + 窗口」确定性造数：同一仓库同一天多次调用结果完全一致。
+        """按「仓库 + 窗口」确定性造数：同一仓库同一窗口多次调用结果完全一致。
 
         刻意保证「至少 1 个已关闭议题 + 1 个已合并 PR」，否则离线演示时
         报告里全是 open，看不出汇总与风险判定的逻辑。
         所有时间强制落在窗口内——这是每日进展最重要的正确性约束。
+
+        完成口径下只造 closed/merged 样本，并留一条 `updated_at` 落在窗口之后
+        的记录：线上「区间内合并、之后又被评论」就是长这样，离线链路必须
+        能验证它不会被右端裁剪误伤。
         """
         rng = random.Random(f"{query.repo_full_name}|progress|{query.window_start:%Y%m%d%H%M}")
         span = max(1.0, (query.window_end - query.window_start).total_seconds())
 
         def moment() -> datetime:
             return query.window_start + timedelta(seconds=rng.random() * span)
+
+        issue_completed = query.issue_axis == "closed"
+        pull_completed = query.pull_axis == "merged"
 
         result = ProgressResult(
             repo_full_name=query.repo_full_name,
@@ -213,9 +220,15 @@ class FakeGitHub:
         if "issues" in query.resources:
             base = rng.randint(100, 700)
             for index in range(rng.randint(2, 4)):
-                updated = moment()
-                # 前两条固定一关一开：演示时既能看到「已关闭」也能看到风险判定
-                state = ("closed", "open")[index] if index < 2 else rng.choice(["open", "closed"])
+                closed_at = moment()
+                if issue_completed:
+                    state = "closed"
+                    # 第一条故意让 updated_at 超出窗口右端
+                    updated = closed_at if index else query.window_end + timedelta(hours=6)
+                else:
+                    # 前两条固定一关一开：演示时既能看到「已关闭」也能看到风险判定
+                    state = ("closed", "open")[index] if index < 2 else rng.choice(["open", "closed"])
+                    updated = closed_at
                 labels = tuple(rng.sample(_LABELS, k=rng.randint(0, 2)))
                 result.issues.append(
                     IssueRecord(
@@ -225,9 +238,9 @@ class FakeGitHub:
                         author=rng.choice(_AUTHORS),
                         state=state,
                         labels=labels,
-                        created_at=updated - timedelta(hours=rng.randint(1, 96)),
+                        created_at=closed_at - timedelta(hours=rng.randint(1, 96)),
                         updated_at=updated,
-                        closed_at=updated if state == "closed" else None,
+                        closed_at=closed_at if state == "closed" else None,
                         comments=rng.randint(0, 9),
                         body_excerpt=excerpt(
                             "现象：定时任务偶发中断；期望：失败后自动重试并记录原因。",
@@ -240,8 +253,13 @@ class FakeGitHub:
         if "pulls" in query.resources:
             base = rng.randint(10, 90)
             for index in range(rng.randint(2, 3)):
-                updated = moment()
-                merged = index == 0
+                merged_at = moment()
+                if pull_completed:
+                    merged = True
+                    updated = merged_at if index else query.window_end + timedelta(hours=6)
+                else:
+                    merged = index == 0
+                    updated = merged_at
                 result.pulls.append(
                     PullRecord(
                         number=base + index,
@@ -251,10 +269,10 @@ class FakeGitHub:
                         state="closed" if merged else "open",
                         draft=(not merged) and rng.random() < 0.3,
                         labels=tuple(rng.sample(_LABELS, k=rng.randint(0, 2))),
-                        created_at=updated - timedelta(hours=rng.randint(2, 120)),
+                        created_at=merged_at - timedelta(hours=rng.randint(2, 120)),
                         updated_at=updated,
-                        closed_at=updated if merged else None,
-                        merged_at=updated if merged else None,
+                        closed_at=merged_at if merged else None,
+                        merged_at=merged_at if merged else None,
                         comments=rng.randint(0, 12),
                         review_comments=rng.randint(0, 8),
                         additions=rng.randint(5, 300),
@@ -267,17 +285,20 @@ class FakeGitHub:
                         or "",
                     )
                 )
-            # 一条机器人 PR：让「过滤机器人」在离线演示里也能被看到
+            # 一条机器人 PR：让「过滤机器人」在离线演示里也能被看到。
+            # 完成口径下服务端只会返回 closed，所以这里也得是已合并的。
             result.pulls.append(
                 PullRecord(
                     number=base + 99,
                     title="chore(deps): bump httpx from 0.27 to 0.28",
                     url=f"https://github.com/{query.repo_full_name}/pull/{base + 99}",
                     author="dependabot[bot]",
-                    state="open",
+                    state="closed" if pull_completed else "open",
                     labels=("dependencies",),
                     created_at=moment(),
                     updated_at=moment(),
+                    closed_at=moment() if pull_completed else None,
+                    merged_at=moment() if pull_completed else None,
                 )
             )
 

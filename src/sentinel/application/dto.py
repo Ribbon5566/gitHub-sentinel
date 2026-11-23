@@ -54,6 +54,10 @@ class DailyProgressOutcome:
     item_count: int
     truncated: tuple[str, ...] = ()
     reused: bool = False
+    # 区间报告才有值
+    date_from: date | None = None
+    period_label: str = ""
+    trimmed: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -65,3 +69,4 @@ class DailyReportOutcome:
     degraded: bool = False
     reused: bool = False
     source_fingerprint: str = ""
+    period_label: str = ""

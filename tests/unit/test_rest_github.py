@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from sentinel.domain.errors import GitHubError, RateLimitError
+from sentinel.domain.errors import GitHubError, RateLimitError, ValidationError
 from sentinel.infrastructure.github.rest_client import RestGitHub
 from sentinel.ports.github import FetchQuery, ProgressQuery
 
@@ -197,7 +197,9 @@ async def test_commits_use_since_and_until() -> None:
     assert params["until"] == "2026-11-23T16:00:00Z"
 
 
-async def test_releases_stop_at_window_start() -> None:
+async def test_releases_are_filtered_by_published_at() -> None:
+    """releases 只能按 published_at 在客户端过滤——服务端按 created_at 排序，
+    所以不能用 stop_before 早停（草稿先建后发布会让两个顺序不一致）。"""
     with respx.mock(base_url=BASE) as router:
         route = router.get(f"/repos/{REPO}/releases").mock(
             return_value=httpx.Response(
@@ -417,3 +419,133 @@ def pull_marker(number: int) -> dict:
     payload = issue_payload(number)
     payload["pull_request"] = {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"}
     return payload
+
+
+# ------------------------------------------------------- 完成口径（研发周期）
+async def test_closed_axis_requests_closed_and_keeps_late_updates() -> None:
+    """完成口径：先让服务端只给 closed，且**不能**按 updated_at 裁右端。"""
+    late = issue_payload(
+        2,
+        updated="2026-11-25T09:00:00Z",  # 窗口之后又被评论
+        state="closed",
+        closed_at="2026-11-23T10:00:00Z",  # 但关闭时间落在窗口内
+    )
+    with respx.mock(base_url=BASE) as router:
+        route = router.get(f"/repos/{REPO}/issues").mock(
+            return_value=httpx.Response(200, json=[late])
+        )
+        github = build()
+        try:
+            result = await github.fetch_progress(
+                ProgressQuery(
+                    repo_full_name=REPO,
+                    window_start=WINDOW_START,
+                    window_end=WINDOW_END,
+                    resources=("issues",),
+                    issue_axis="closed",
+                )
+            )
+        finally:
+            await github.aclose()
+
+    assert [item.number for item in result.issues] == [2]
+    params = route.calls[0].request.url.params
+    assert params["state"] == "closed"
+    assert params["since"] == "2026-11-22T16:00:00Z"
+
+
+async def test_merged_axis_does_not_drop_prs_merged_inside_window() -> None:
+    """反例回归：把翻页停止键换成 merged_at，第二页里真正属于本期的 PR 就漏了。
+
+    线上形态是：A 早合并、但最近被评论（updated 很新，排在最前）；
+    B 恰在本期合并（排在其后）。停止条件必须作用在服务端的 updated_at 上。
+    """
+    link = f'<{BASE}/repos/{REPO}/pulls?page=2>; rel="next"'
+    with respx.mock(base_url=BASE) as router:
+        route = router.get(f"/repos/{REPO}/pulls").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json=[
+                        pull_payload(
+                            10,
+                            updated="2026-11-23T20:00:00Z",
+                            state="closed",
+                            closed_at="2026-11-10T00:00:00Z",
+                            merged_at="2026-11-10T00:00:00Z",
+                        )
+                    ],
+                    headers={"Link": link},
+                ),
+                httpx.Response(
+                    200,
+                    json=[
+                        pull_payload(
+                            11,
+                            updated="2026-11-23T12:00:00Z",
+                            state="closed",
+                            closed_at="2026-11-23T12:00:00Z",
+                            merged_at="2026-11-23T12:00:00Z",
+                        )
+                    ],
+                ),
+            ]
+        )
+        github = build(max_pages=2)
+        try:
+            result = await github.fetch_progress(
+                ProgressQuery(
+                    repo_full_name=REPO,
+                    window_start=WINDOW_START,
+                    window_end=WINDOW_END,
+                    resources=("pulls",),
+                    pull_axis="merged",
+                    per_page=2,
+                    max_pages=2,
+                )
+            )
+        finally:
+            await github.aclose()
+
+    assert [item.number for item in result.pulls] == [10, 11]
+    assert route.calls[0].request.url.params["state"] == "closed"
+    assert "since" not in route.calls[0].request.url.params
+    assert route.call_count == 2  # 必须真的翻到第二页
+
+
+async def test_progress_marks_truncated_when_page_budget_exhausted() -> None:
+    link = f'<{BASE}/repos/{REPO}/pulls?page=3>; rel="next"'
+    with respx.mock(base_url=BASE) as router:
+        router.get(f"/repos/{REPO}/pulls").mock(
+            return_value=httpx.Response(
+                200,
+                json=[pull_payload(10, updated="2026-11-23T10:00:00Z")],
+                headers={"Link": link},
+            )
+        )
+        github = build(max_pages=2)
+        try:
+            result = await github.fetch_progress(
+                ProgressQuery(
+                    repo_full_name=REPO,
+                    window_start=WINDOW_START,
+                    window_end=WINDOW_END,
+                    resources=("pulls",),
+                    per_page=2,
+                    max_pages=2,
+                )
+            )
+        finally:
+            await github.aclose()
+
+    assert result.truncated["pulls"] is True
+
+
+def test_progress_query_rejects_absurd_page_budget() -> None:
+    with pytest.raises(ValidationError):
+        ProgressQuery(
+            repo_full_name=REPO,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            max_pages=500,
+        )

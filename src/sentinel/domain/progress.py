@@ -22,6 +22,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from .errors import ValidationError
 from .filters import is_bot_author
 from .models import as_utc
+from .selection import ReportSelection
 
 # 风险标签：与 digest 的判定保持同一套词表，避免两处口径漂移
 RISK_LABELS = ("breaking", "breaking-change", "security", "critical", "regression", "bug")
@@ -130,14 +131,33 @@ class DailyProgress(_Record):
     window_end: AwareDatetime
     generated_at: AwareDatetime
 
+    # 区间报告才有值；单日模式为 None（day 就是那一天）
+    date_from: date | None = None
+    # 展示与排序的时间轴：issues 取 "updated_at"/"closed_at"，None 表示本次不纳入该资源
+    issue_axis: str | None = "updated_at"
+    pull_axis: str | None = "updated_at"
+
     issues: tuple[IssueRecord, ...] = ()
     pulls: tuple[PullRecord, ...] = ()
     commits: tuple[CommitRecord, ...] = ()
     releases: tuple[ReleaseRecord, ...] = ()
 
+    # truncated: 翻页触顶，统计只是下界（会漏报）
+    # trimmed:   展示条数超限，数据完整、统计准确，只是表格少几行
     truncated: frozenset[str] = frozenset()
+    trimmed: frozenset[str] = frozenset()
     stats: dict[str, int] = Field(default_factory=dict)
     fingerprint: str = ""
+
+    @property
+    def period_label(self) -> str:
+        if self.date_from is None or self.date_from == self.day:
+            return f"{self.day:%Y-%m-%d}"
+        return f"{self.date_from:%Y-%m-%d} ~ {self.day:%Y-%m-%d}"
+
+    @property
+    def completion_mode(self) -> bool:
+        return self.issue_axis == "closed_at" or self.pull_axis == "merged_at"
 
     @property
     def item_count(self) -> int:
@@ -195,12 +215,19 @@ def build_daily_progress(
     truncated: Iterable[str] = (),
     max_items: int = 200,
     skip_bots: bool = True,
+    selection: ReportSelection | None = None,
+    date_from: date | None = None,
 ) -> DailyProgress:
-    """排序、过滤机器人、截断、算统计与指纹，产出不可变聚合。"""
+    """过滤、排序、截断、算统计与指纹，产出不可变聚合。
+
+    传 selection 时按口径筛选（研发周期报告）；不传时保持 v2.0 的单日活动口径，
+    此时 REST 已经按窗口裁过两端，这里不再做第二遍判断。
+    """
     if window_end <= window_start:
         raise ValidationError("报告窗口为空：请检查日期与时区配置")
 
     flags = {name for name in truncated if name in PROGRESS_RESOURCES}
+    trims: set[str] = set()
     bot_filtered = 0
 
     def keep(author: str) -> bool:
@@ -212,18 +239,35 @@ def build_daily_progress(
 
     def trim(items: list, resource: str) -> tuple:
         if len(items) > max_items:
-            flags.add(resource)
+            # 展示裁剪不影响统计：compute_stats 仍按全量算
+            trims.add(resource)
             return tuple(items[:max_items])
         return tuple(items)
 
+    def issue_stamp(item: IssueRecord) -> datetime:
+        return selection.issue_time(item) if selection is not None else item.updated_at
+
+    def pull_stamp(item: PullRecord) -> datetime:
+        return selection.pull_time(item) if selection is not None else item.updated_at
+
+    def keep_issue(item: IssueRecord) -> bool:
+        if not keep(item.author):
+            return False
+        return selection is None or selection.keeps_issue(item, window_start, window_end)
+
+    def keep_pull(item: PullRecord) -> bool:
+        if not keep(item.author):
+            return False
+        return selection is None or selection.keeps_pull(item, window_start, window_end)
+
     issue_items = sorted(
-        (item for item in issues if keep(item.author)),
-        key=lambda item: (item.updated_at, item.number),
+        filter(keep_issue, issues),
+        key=lambda item: (issue_stamp(item), item.number),
         reverse=True,
     )
     pull_items = sorted(
-        (item for item in pulls if keep(item.author)),
-        key=lambda item: (item.updated_at, item.number),
+        filter(keep_pull, pulls),
+        key=lambda item: (pull_stamp(item), item.number),
         reverse=True,
     )
     commit_items = sorted(
@@ -241,15 +285,19 @@ def build_daily_progress(
         repo_full_name=repo_full_name,
         repo_title=repo_title or repo_full_name,
         day=day,
+        date_from=date_from,
         timezone=timezone,
         window_start=window_start,
         window_end=window_end,
         generated_at=generated_at,
+        issue_axis=selection.issue_time_attr if selection is not None else "updated_at",
+        pull_axis=selection.pull_time_attr if selection is not None else "updated_at",
         issues=trim(issue_items, "issues"),
         pulls=trim(pull_items, "pulls"),
         commits=trim(commit_items, "commits"),
         releases=trim(release_items, "releases"),
         truncated=frozenset(flags),
+        trimmed=frozenset(trims),
         stats=compute_stats(
             issues=issue_items,
             pulls=pull_items,
@@ -289,21 +337,30 @@ def compute_stats(
 
 
 def progress_fingerprint(progress: DailyProgress) -> str:
-    """内容指纹：只认「对象身份 + 关键时间」，不认 generated_at。
+    """内容指纹：只认「口径 + 对象身份 + 关键时间」，不认 generated_at。
 
-    同一天同样的数据重跑必然得到同一指纹，报告才能靠指纹跳过一次模型调用。
+    两个刻意的取舍：
+      1. **不含 window_end**。窗口右端会被裁到「现在」，若纳入指纹，今天
+         10:00 与 10:05 各跑一次就会得到不同指纹，明明数据没变却重写文件、
+         重调模型。
+      2. **时间取口径对应的时间轴**。完成口径下同一条 PR 在区间内合并、
+         之后被评论不会改指纹（否则一条评论就白烧一次 token）；
+         而「区间内重新关闭」会让 closed_at 变化，指纹随之刷新。
     """
     payload = {
         "repo": progress.repo_full_name,
         "day": progress.day.isoformat(),
-        "window_start": progress.window_start.isoformat(),
-        "window_end": progress.window_end.isoformat(),
+        "date_from": progress.date_from.isoformat() if progress.date_from else None,
+        "issue_axis": progress.issue_axis,
+        "pull_axis": progress.pull_axis,
+        "trimmed": sorted(progress.trimmed),
+        "truncated": sorted(progress.truncated),
         "issues": [
-            [item.number, item.state, item.updated_at.isoformat()]
+            [item.number, item.state, _axis_stamp(item, progress.issue_axis)]
             for item in progress.issues
         ],
         "pulls": [
-            [item.number, item.status_label, item.updated_at.isoformat()]
+            [item.number, item.status_label, _axis_stamp(item, progress.pull_axis)]
             for item in progress.pulls
         ],
         "commits": [[item.sha, item.committed_at.isoformat()] for item in progress.commits],
@@ -313,6 +370,23 @@ def progress_fingerprint(progress: DailyProgress) -> str:
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _axis_stamp(item: IssueRecord | PullRecord, axis: str | None) -> str:
+    """取口径对应的时间；轴字段缺失时退回 updated_at，避免整条记录被跳过。"""
+    if axis:
+        moment = getattr(item, axis, None)
+        if isinstance(moment, datetime):
+            return moment.isoformat()
+    return item.updated_at.isoformat()
+
+
+def _sort_stamp(item: IssueRecord | PullRecord, axis: str | None) -> datetime:
+    if axis:
+        moment = getattr(item, axis, None)
+        if isinstance(moment, datetime):
+            return moment
+    return item.updated_at
 
 
 def rank_highlights(progress: DailyProgress, limit: int = 5) -> tuple[str, ...]:
@@ -328,17 +402,19 @@ def rank_highlights(progress: DailyProgress, limit: int = 5) -> tuple[str, ...]:
         suffix = "" if not label or label in {item.tag, f"Release {item.tag}"} else f"：{label}"
         scored.append((100, item.published_at, f"发布 {item.tag}{suffix}"))
     for item in progress.pulls:
+        stamp = _sort_stamp(item, progress.pull_axis)
         if item.is_merged:
-            scored.append((90, item.updated_at, f"PR #{item.number} 已合并：{item.title}"))
+            scored.append((90, stamp, f"PR #{item.number} 已合并：{item.title}"))
         elif item.draft:
-            scored.append((35, item.updated_at, f"PR #{item.number} 仍为草稿：{item.title}"))
+            scored.append((35, stamp, f"PR #{item.number} 仍为草稿：{item.title}"))
         else:
-            scored.append((60, item.updated_at, f"PR #{item.number} 待评审：{item.title}"))
+            scored.append((60, stamp, f"PR #{item.number} 待评审：{item.title}"))
     for item in progress.issues:
+        stamp = _sort_stamp(item, progress.issue_axis)
         if item.is_closed:
-            scored.append((70, item.updated_at, f"议题 #{item.number} 已关闭：{item.title}"))
+            scored.append((70, stamp, f"议题 #{item.number} 已关闭：{item.title}"))
         else:
-            scored.append((40, item.updated_at, f"议题 #{item.number} 有新进展：{item.title}"))
+            scored.append((40, stamp, f"议题 #{item.number} 有新进展：{item.title}"))
 
     ranked = sorted(scored, key=lambda entry: (entry[0], entry[1]), reverse=True)
     return tuple(item[2] for item in ranked[:limit])
@@ -349,21 +425,41 @@ def detect_risks(progress: DailyProgress, limit: int = 5) -> tuple[str, ...]:
 
     不做语义判断：判断「这个改动风险大不大」是模型的事，
     但「带 security 标签且还没关」是事实，可以算。
+
+    完成口径下「未关闭/未合并」的分支恒为空，所以换成一条互补的规则：
+    带风险标签却已经在区间内关闭/合并的，提示回归验证。
     """
     risks: list[str] = []
+    completion = progress.completion_mode
     for item in progress.issues:
         hit = _risk_labels(item.labels)
-        if hit and not item.is_closed:
+        if not hit:
+            continue
+        if completion:
+            if item.is_closed:
+                risks.append(
+                    f"议题 #{item.number}「{item.title}」带 {', '.join(hit)} 标签已在区间内关闭，"
+                    "建议确认修复是否真正落地"
+                )
+        elif not item.is_closed:
             risks.append(
                 f"议题 #{item.number}「{item.title}」带 {', '.join(hit)} 标签且仍未关闭，建议确认影响范围"
             )
     for item in progress.pulls:
         hit = _risk_labels(item.labels)
-        if hit and not item.is_merged:
+        if not hit:
+            continue
+        if completion:
+            if item.is_merged:
+                risks.append(
+                    f"PR #{item.number}「{item.title}」带 {', '.join(hit)} 标签已在区间内合并，"
+                    "建议安排回归验证"
+                )
+        elif not item.is_merged:
             risks.append(
                 f"PR #{item.number}「{item.title}」带 {', '.join(hit)} 标签且尚未合并，合并前需要重点复核"
             )
-    if not risks and progress.issues:
+    if not risks and not completion and progress.issues:
         stale = [item for item in progress.issues if not item.is_closed and item.comments == 0]
         if stale:
             numbers = "、".join(f"#{item.number}" for item in stale[:3])
@@ -374,14 +470,23 @@ def detect_risks(progress: DailyProgress, limit: int = 5) -> tuple[str, ...]:
 def summary_line(progress: DailyProgress) -> str:
     """一句话概览，进度文档与报告都用它，保证两处口径一致。"""
     stats = progress.stats
-    return (
-        f"本日 {stats.get('issues_total', 0)} 个议题有更新"
-        f"（{stats.get('issues_closed', 0)} 个关闭）、"
-        f"{stats.get('pulls_total', 0)} 个 PR 有更新"
-        f"（{stats.get('pulls_merged', 0)} 个合并）、"
-        f"{stats.get('commits_total', 0)} 次提交、"
-        f"{stats.get('releases_total', 0)} 个发布"
-    )
+    parts: list[str] = []
+    if progress.issue_axis is not None:
+        closed = stats.get("issues_closed", 0)
+        if progress.issue_axis == "closed_at":
+            parts.append(f"{closed} 个议题关闭")
+        else:
+            parts.append(f"{stats.get('issues_total', 0)} 个议题有更新（{closed} 个关闭）")
+    if progress.pull_axis is not None:
+        merged = stats.get("pulls_merged", 0)
+        if progress.pull_axis == "merged_at":
+            parts.append(f"{merged} 个 PR 合并")
+        else:
+            parts.append(f"{stats.get('pulls_total', 0)} 个 PR 有更新（{merged} 个合并）")
+    parts.append(f"{stats.get('commits_total', 0)} 次提交")
+    parts.append(f"{stats.get('releases_total', 0)} 个发布")
+    prefix = "本期" if progress.completion_mode else "本日"
+    return f"{prefix} " + "、".join(parts)
 
 
 def _risk_labels(labels: tuple[str, ...]) -> tuple[str, ...]:

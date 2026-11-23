@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # 基础
     env: str = "dev"
     app_name: str = "GitHub Sentinel"
-    version: str = "2.0.0"
+    version: str = "3.0.0"
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     # 每日报告
     report_max_input_chars: int = 24000
     report_max_output_tokens: int = 1600
+
+    # 研发周期报告（v3.0）：区间筛选的边界与预算
+    # 跨度上限：超过一个季度基本不可能靠 REST 翻页取全，宁可直接拒绝
+    report_range_max_days: int = 92
+    # 区间模式的翻页预算（单资源），per_page=50 时约 500 条
+    report_range_max_pages: int = 10
+    # 区间报告的模型输入上限：明细比单日多得多
+    report_range_max_input_chars: int = 32000
 
     # 通知
     notify_channel: NotifyChannel = "null"

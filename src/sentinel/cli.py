@@ -11,6 +11,10 @@ v2.0 追加的每日动线（与上面的 cron 简报是两条独立链路）：
     progress   → 拉当日 issues/PR，落一份「项目+日期」的 md
     report     → 只读那份 md，调模型出正式日报（不访问 GitHub）
     daily      → 上面两步连着跑
+
+v3.0 在这条动线上加了「条件筛选」：用 --from/--to 给出研发周期，
+默认只收区间内**已合并的 PR** 与**已关闭的议题**（完成口径），
+产物按区间命名，不覆盖单日的 YYYY-MM-DD.md。
 """
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from .config import Settings, load_settings
 from .container import Container
 from .domain.errors import NotFoundError, SentinelError, ValidationError
 from .domain.models import FetchCursor, Subscription, normalize_repo_full_name
+from .domain.period import ReportPeriod
+from .domain.selection import ReportSelection
 from .logging_setup import configure_logging
 
 DEMO_REPO = "fastapi/fastapi"
@@ -76,6 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
             help="按订阅 ID 指定，可重复",
         )
         daily.add_argument("--date", default=None, help="报告日期 YYYY-MM-DD，默认今天")
+        daily.add_argument(
+            "--from", dest="date_from", default=None, metavar="YYYY-MM-DD",
+            help="研发周期起点；给了区间就按「完成口径」筛选（默认只收已合并 PR 与已关闭议题）",
+        )
+        daily.add_argument(
+            "--to", dest="date_to", default=None, metavar="YYYY-MM-DD",
+            help="研发周期终点（含当天），默认今天；单独使用无效，必须配 --from",
+        )
+        daily.add_argument("--merged", action="store_true", help="只收已合并的 PR")
+        daily.add_argument("--closed", action="store_true", help="只收已关闭的议题")
+        daily.add_argument(
+            "--activity", action="store_true",
+            help="按 updated_at 口径（v2.0 语义）而不是完成时间",
+        )
         daily.add_argument("--force", action="store_true", help="忽略指纹，强制重新生成")
 
     return parser
@@ -259,6 +279,59 @@ def _parse_day(raw: str | None, settings: Settings) -> date:
         raise ValidationError(f"--date 需要 YYYY-MM-DD，收到 {raw!r}") from exc
 
 
+def _parse_date(raw: str, *, flag: str) -> date:
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValidationError(f"{flag} 需要 YYYY-MM-DD，收到 {raw!r}") from exc
+
+
+def _resolve_period(
+    args: argparse.Namespace, settings: Settings
+) -> tuple[ReportPeriod | None, ReportSelection | None]:
+    """把参数解析成 (研发周期, 筛选口径)。
+
+    返回 (None, None) 表示走 v2.0 的单日活动口径——**模式由 flag 决定，
+    不由日期形状决定**：否则 `--date 2026-11-23 --merged` 会悄悄覆盖
+    单日产物 2026-11-23.md。
+    """
+    date_from = getattr(args, "date_from", None)
+    date_to = getattr(args, "date_to", None)
+    merged = bool(getattr(args, "merged", False))
+    closed = bool(getattr(args, "closed", False))
+    activity = bool(getattr(args, "activity", False))
+    day_flag = getattr(args, "date", None)
+
+    if not any((date_from, date_to, merged, closed, activity)):
+        return None, None
+
+    if day_flag:
+        raise ValidationError("--date 与 --from/--to 不能同时使用")
+    if date_to and not date_from:
+        raise ValidationError("--to 需要配合 --from 使用")
+    if activity and (merged or closed):
+        raise ValidationError("--activity 与 --merged/--closed 不能同时使用")
+    if (merged or closed or activity) and not date_from:
+        raise ValidationError("--merged/--closed/--activity 需要配合 --from 使用")
+
+    start = _parse_date(date_from, flag="--from")
+    end = _parse_date(date_to, flag="--to") if date_to else datetime.now(settings.daily_tz).date()
+    period = ReportPeriod(date_from=start, date_to=end)
+
+    if activity:
+        selection = ReportSelection.activity()
+    elif merged and closed:
+        selection = ReportSelection.completion()
+    elif merged:
+        selection = ReportSelection.merged_only()
+    elif closed:
+        selection = ReportSelection.closed_only()
+    else:
+        # 只给区间不给口径：默认交付清单（已合并 PR + 已关闭议题）
+        selection = ReportSelection.completion()
+    return period, selection
+
+
 async def _resolve_targets(
     container: Container, args: argparse.Namespace
 ) -> list[tuple[str, str | None]]:
@@ -291,7 +364,15 @@ async def _resolve_targets(
     return [(sub.repo_full_name, sub.display_name) for sub in await container.subs.list_active()]
 
 
-def _stats_line(stats: dict[str, int]) -> str:
+def _stats_line(stats: dict[str, int], *, completion: bool = False) -> str:
+    """完成口径下 issues_total ≡ issues_closed，不必再重复两个数。"""
+    if completion:
+        return (
+            f"关闭议题 {stats.get('issues_closed', 0)} / "
+            f"合并 PR {stats.get('pulls_merged', 0)} / "
+            f"提交 {stats.get('commits_total', 0)} / 发布 {stats.get('releases_total', 0)} / "
+            f"贡献者 {stats.get('contributors', 0)}"
+        )
     return (
         f"议题 {stats.get('issues_total', 0)}（关闭 {stats.get('issues_closed', 0)}）/ "
         f"PR {stats.get('pulls_total', 0)}"
@@ -312,7 +393,15 @@ async def _daily(
     container = await _open(settings)
     try:
         try:
-            day = _parse_day(args.date, settings)
+            period, selection = _resolve_period(args, settings)
+            if period is not None:
+                # 全局参数校验前置到这里：放到服务里虽然也会在任何 GitHub 请求之前失败，
+                # 但会变成「每个仓库各报一次同样的错」，批量跑时刷屏且看不出是参数问题
+                period.validate(
+                    today=datetime.now(settings.daily_tz).date(),
+                    max_days=settings.report_range_max_days,
+                )
+            day = _parse_day(args.date, settings) if period is None else period.date_to
             targets = await _resolve_targets(container, args)
         except SentinelError as exc:
             print(f"参数错误: {exc}", file=sys.stderr)
@@ -322,24 +411,60 @@ async def _daily(
             print("没有可处理的目标：先订阅仓库，或用 --repo 指定", file=sys.stderr)
             return 1
 
+        # 区间标签放在头部打印一次，避免每个仓库重复一遍口径说明
+        label = period.label() if period is not None else str(day)
+        if period is not None and selection is not None:
+            print(f"研发周期 {label} · {selection.scope_label()}")
+
         code = 0
         for index, (repo, title) in enumerate(targets, start=1):
-            print(f"[{index}/{len(targets)}] {repo} {day}")
+            print(f"[{index}/{len(targets)}] {repo} {label}")
             try:
                 if do_progress:
-                    progress = await container.daily_progress_service.build(
-                        repo_full_name=repo, day=day, repo_title=title, force=args.force
-                    )
+                    # 两种调用形状：单日只给 day，区间给 period+selection；
+                    # 服务的签名要求二者必居其一，这里不要用「day=None」混过去。
+                    if period is None:
+                        progress = await container.daily_progress_service.build(
+                            repo_full_name=repo, day=day, repo_title=title, force=args.force
+                        )
+                    else:
+                        progress = await container.daily_progress_service.build(
+                            repo_full_name=repo,
+                            period=period,
+                            selection=selection,
+                            repo_title=title,
+                            force=args.force,
+                        )
                     suffix = "（内容未变，复用）" if progress.reused else ""
                     print(f"  进展: {_display(progress.path)}{suffix}")
-                    print(f"  统计: {_stats_line(progress.stats)}")
+                    print(f"  统计: {_stats_line(progress.stats, completion=period is not None)}")
+                    # 展示裁剪：数据是全的，只是列表只印前 N 条
+                    if progress.trimmed:
+                        print(
+                            f"  提示: 以下资源仅展示前 {settings.daily_max_items_per_resource} 条"
+                            f"（统计仍按全量）：{'、'.join(progress.trimmed)}"
+                        )
+                    # 翻页触顶：统计本身是下界，属于要人介入的情况，走 stderr 但不影响退出码
                     if progress.truncated:
-                        print(f"  提示: 以下资源触及条数上限被截断：{'、'.join(progress.truncated)}")
+                        print(
+                            "  警告: 以下资源触及翻页上限，统计为下界、可能漏报"
+                            f"（可调大 SENTINEL_REPORT_RANGE_MAX_PAGES）："
+                            f"{'、'.join(progress.truncated)}",
+                            file=sys.stderr,
+                        )
 
                 if do_report:
-                    report = await container.daily_report_service.build(
-                        repo_full_name=repo, day=day, force=args.force
-                    )
+                    if period is None:
+                        report = await container.daily_report_service.build(
+                            repo_full_name=repo, day=day, force=args.force
+                        )
+                    else:
+                        # selection 也要传：否则 --merged 会去读默认口径那份文件，
+                        # 静默把另一套数据集写成报告
+                        report = await container.daily_report_service.build(
+                            repo_full_name=repo, period=period, selection=selection,
+                            force=args.force,
+                        )
                     if report.reused:
                         print(f"  报告: {_display(report.path)}（内容未变，跳过模型调用）")
                     else:

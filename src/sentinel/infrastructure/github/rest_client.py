@@ -236,21 +236,26 @@ class RestGitHub:
         )
 
         if "issues" in query.resources:
+            # 完成口径：先让服务端只返回 closed（PR 混入的在映射时丢弃），
+            # 并且**不能**按 updated_at 裁右端——区间内关闭、之后又被评论的对象
+            # 的 updated_at 会超出窗口，裁掉就漏报了。
+            completed = query.issue_axis == "closed"
             fetched = await self._paginate(
                 path=f"/repos/{repo}/issues",
                 params={
-                    "state": "all",
+                    "state": "closed" if completed else "all",
                     "sort": "updated",
                     "direction": "desc",
-                    # issues 支持 since（闭区间），但仍要客户端裁掉窗口右端
+                    # issues 支持 since（按 updated_at 过滤，闭区间）
                     "since": _iso(query.window_start),
                 },
                 resource="issues",
                 per_page=per_page,
                 max_pages=query.max_pages,
                 etag=None,
+                # 停止键必须仍是 updated_at：它才是服务端的排序键
                 stop_before=query.window_start,
-                skip_at_or_after=query.window_end,
+                skip_at_or_after=None if completed else query.window_end,
                 mapper=lambda payload: parse_issue(
                     payload, excerpt_chars=query.body_excerpt_chars
                 ),
@@ -259,18 +264,25 @@ class RestGitHub:
             )
             result.issues = fetched.items
             result.truncated["issues"] = fetched.truncated
+            result.skipped["issues"] = fetched.skipped
 
         if "pulls" in query.resources:
+            completed = query.pull_axis == "merged"
             fetched = await self._paginate(
                 path=f"/repos/{repo}/pulls",
-                # pulls 没有 since 参数：只能按 updated 倒序取，再在客户端截断
-                params={"state": "all", "sort": "updated", "direction": "desc"},
+                # pulls 没有 since 参数：只能按 updated 倒序取，再在客户端判断。
+                # REST 也不支持 state=merged，合并只能看 merged_at，故用 closed 缩小范围。
+                params={
+                    "state": "closed" if completed else "all",
+                    "sort": "updated",
+                    "direction": "desc",
+                },
                 resource="pulls",
                 per_page=per_page,
                 max_pages=query.max_pages,
                 etag=None,
                 stop_before=query.window_start,
-                skip_at_or_after=query.window_end,
+                skip_at_or_after=None if completed else query.window_end,
                 mapper=lambda payload: parse_pull(
                     payload, excerpt_chars=query.body_excerpt_chars
                 ),
@@ -279,6 +291,7 @@ class RestGitHub:
             )
             result.pulls = fetched.items
             result.truncated["pulls"] = fetched.truncated
+            result.skipped["pulls"] = fetched.skipped
 
         if "commits" in query.resources:
             fetched = await self._paginate(
@@ -301,17 +314,21 @@ class RestGitHub:
             )
             result.commits = fetched.items
             result.truncated["commits"] = fetched.truncated
+            result.skipped["commits"] = fetched.skipped
 
         if "releases" in query.resources:
             fetched = await self._paginate(
                 path=f"/repos/{repo}/releases",
-                # releases 只有 created_at 倒序，没有时间参数
+                # releases 没有时间参数，且服务端按 created_at 排序、我们取的是
+                # published_at：草稿先建后发布会让这两个顺序不一致，
+                # 因此左端只能逐条丢弃（skip_before），不能用 stop_before 早停。
                 params={},
                 resource="releases",
                 per_page=per_page,
                 max_pages=query.max_pages,
                 etag=None,
-                stop_before=query.window_start,
+                stop_before=None,
+                skip_before=query.window_start,
                 skip_at_or_after=query.window_end,
                 mapper=lambda payload: parse_release(
                     payload, excerpt_chars=query.body_excerpt_chars
@@ -321,6 +338,7 @@ class RestGitHub:
             )
             result.releases = fetched.items
             result.truncated["releases"] = fetched.truncated
+            result.skipped["releases"] = fetched.skipped
 
         truncated = [name for name, flag in result.truncated.items() if flag]
         if truncated:
@@ -360,11 +378,16 @@ class RestGitHub:
         key_of: Callable[[Any], str],
         stop_before: datetime | None = None,
         skip_at_or_after: datetime | None = None,
+        skip_before: datetime | None = None,
     ) -> _Fetched:
         """按页取到 max_pages，遇窗口下界或没有下一页为止。
 
         `stop_before` 只在服务端确保证结果倒序时使用（四类资源都满足），
         因此「遇到更早的记录」可以安全地整体停止，而不是继续翻剩余页。
+
+        `skip_before` 是「左端过滤但不停」：服务端排序键与被过滤字段不一致时
+        （releases 按 created_at 排序、我们看 published_at），早停会漏，
+        只能继续翻页并逐条丢弃。
         """
         fetched = _Fetched()
         seen: set[str] = set()
@@ -400,6 +423,8 @@ class RestGitHub:
                 if stop_before is not None and stamp < stop_before:
                     stop = True
                     break
+                if skip_before is not None and stamp < skip_before:
+                    continue
                 if skip_at_or_after is not None and stamp >= skip_at_or_after:
                     continue
                 key = key_of(record)

@@ -18,6 +18,7 @@ from jinja2 import Environment
 from ...config import Settings
 from ...domain.frontmatter import dump_front_matter
 from ...domain.progress import STAT_KEYS
+from ...domain.report import progress_headings, stat_labels
 from ...ports.renderer import DailyProgressContext, DailyReportContext
 from .jinja_renderer import build_environment
 
@@ -41,6 +42,10 @@ class JinjaDailyRenderer:
     # ------------------------------------------------------------------ 进度
     def render_progress(self, context: DailyProgressContext) -> str:
         stats = {key: context.stats.get(key, 0) for key in STAT_KEYS}
+        completion = context.scope_completion
+        labels = progress_headings(completion, stats)
+        stat_rows = [(label, stats[key]) for key, label in stat_labels(completion)]
+        day_label = context.period_label or f"{context.day:%Y-%m-%d}"
         meta: dict[str, object] = {
             "repo": context.repo_full_name,
             "repo_title": context.repo_title,
@@ -55,16 +60,29 @@ class JinjaDailyRenderer:
             "highlights_json": list(context.highlights),
             "risks_json": list(context.risks),
         }
+        # 只有区间/非默认口径才写这些键：单日文档保持 v2.0 的原样，
+        # 免得历史文件与新建文件在 front matter 上出现无意义的差异
+        if context.date_from:
+            meta["date_from"] = f"{context.date_from:%Y-%m-%d}"
+        if context.period_label:
+            meta["period_label"] = context.period_label
+            meta["issue_axis"] = context.issue_axis_attr
+            meta["pull_axis"] = context.pull_axis_attr
+        if context.trimmed:
+            meta["trimmed"] = ",".join(sorted(context.trimmed))
         body = self.env.get_template("daily_progress.md.j2").render(
             ctx=context,
             s=stats,
+            labels=labels,
+            stat_rows=stat_rows,
             resources=context.resources,
-            day_label=f"{context.day:%Y-%m-%d}",
+            day_label=day_label,
             window_start_label=self._format_datetime(context.window_start),
             window_end_label=self._format_datetime(context.window_end),
             generated_label=self._format_datetime(context.generated_at),
             max_items=context.max_items,
             truncated="、".join(sorted(context.truncated)),
+            trimmed="、".join(sorted(context.trimmed)),
         )
         return f"{dump_front_matter(meta)}\n\n{body.strip()}\n"
 
@@ -81,10 +99,11 @@ class JinjaDailyRenderer:
             for name, title in _APPENDIX
             if sections.get(name, "").strip()
         ]
-        title = (
-            f"{meta.get('repo_title') or meta.get('repo', '')} 项目每日报告"
-            f" · {meta.get('date', '')}"
-        )
+        repo_title = meta.get("repo_title") or meta.get("repo", "")
+        if meta.get("period_label"):
+            title = f"{repo_title} 项目研发周期报告 · {meta['period_label']}"
+        else:
+            title = f"{repo_title} 项目每日报告 · {meta.get('date', '')}"
         body = self.env.get_template("daily_report.md.j2").render(
             title=title,
             body_md=body_md.strip(),
@@ -99,22 +118,34 @@ class JinjaDailyRenderer:
         merged = stats.get("pulls_merged", 0)
         releases = stats.get("releases_total", 0)
 
-        headline = (
-            f"本日 {issues_total} 个议题、{pulls_total} 个 PR 有更新，"
-            f"{merged} 个 PR 合并、{releases} 个版本发布。"
-        )
-        bullets = list(context.highlights) or ["本日没有记录到发布、合并或关闭事件。"]
+        if context.scope_completion:
+            headline = (
+                f"本期 {stats.get('issues_closed', 0)} 个议题关闭、{merged} 个 PR 合并、"
+                f"{releases} 个版本发布。"
+            )
+            default_bullet = "本期没有记录到合并或关闭事件。"
+            all_plans = ["核对本期交付清单与里程碑是否一致。", "对本期合并的高风险改动安排回归验证。"]
+        else:
+            headline = (
+                f"本日 {issues_total} 个议题、{pulls_total} 个 PR 有更新，"
+                f"{merged} 个 PR 合并、{releases} 个版本发布。"
+            )
+            default_bullet = "本日没有记录到发布、合并或关闭事件。"
+            all_plans = []
+
+        bullets = list(context.highlights) or [default_bullet]
         risks = list(context.risks)
 
-        plans: list[str] = []
-        if stats.get("issues_open"):
-            plans.append(f"跟进 {stats['issues_open']} 个未关闭议题，明确负责人与处理时限。")
-        if stats.get("pulls_open"):
-            plans.append(f"推进 {stats['pulls_open']} 个待合并 PR 的评审与合入。")
-        if stats.get("pulls_draft"):
-            plans.append(f"确认 {stats['pulls_draft']} 个草稿 PR 的验收标准。")
-        if not plans:
-            plans.append("保持当前节奏，关注次日新增议题与 PR。")
+        plans: list[str] = list(all_plans)
+        if not context.scope_completion:
+            if stats.get("issues_open"):
+                plans.append(f"跟进 {stats['issues_open']} 个未关闭议题，明确负责人与处理时限。")
+            if stats.get("pulls_open"):
+                plans.append(f"推进 {stats['pulls_open']} 个待合并 PR 的评审与合入。")
+            if stats.get("pulls_draft"):
+                plans.append(f"确认 {stats['pulls_draft']} 个草稿 PR 的验收标准。")
+            if not plans:
+                plans.append("保持当前节奏，关注次日新增议题与 PR。")
 
         return self.env.get_template("daily_report_fallback.md.j2").render(
             headline=headline,

@@ -18,6 +18,7 @@ from sentinel.domain.progress import (
     resolve_day_window,
     summary_line,
 )
+from sentinel.domain.selection import ReportSelection
 
 SH = ZoneInfo("Asia/Shanghai")
 DAY = date(2026, 11, 23)
@@ -30,6 +31,7 @@ def make_issue(
     state: str = "open",
     author: str = "alice",
     updated: datetime | None = None,
+    closed: datetime | None = None,
     labels: tuple[str, ...] = (),
     comments: int = 0,
 ) -> IssueRecord:
@@ -42,6 +44,7 @@ def make_issue(
         labels=labels,
         created_at=moment,
         updated_at=moment,
+        closed_at=closed,
         comments=comments,
     )
 
@@ -50,22 +53,24 @@ def make_pull(
     number: int = 10,
     *,
     merged: bool = False,
+    merged_at: datetime | None = None,
     draft: bool = False,
     author: str = "bob",
     updated: datetime | None = None,
     labels: tuple[str, ...] = (),
 ) -> PullRecord:
     moment = updated or NOON
+    stamp = merged_at or (moment if merged else None)
     return PullRecord(
         number=number,
         title=f"PR {number}",
         author=author,
-        state="closed" if merged else "open",
+        state="closed" if stamp else "open",
         draft=draft,
         labels=labels,
         created_at=moment,
         updated_at=moment,
-        merged_at=moment if merged else None,
+        merged_at=stamp,
     )
 
 
@@ -177,9 +182,114 @@ def test_fingerprint_changes_when_content_changes() -> None:
 def test_truncation_marks_resource() -> None:
     progress = build(issues=[make_issue(index) for index in range(5)], max_items=3)
     assert len(progress.issues) == 3
-    assert "issues" in progress.truncated
-    # 统计仍按全部条目算，表格只展示前 N 条，文档里会说明这一点
+    # 展示裁剪写 trimmed：数据本身是完整的，统计准确，只是表格少几行
+    assert "issues" in progress.trimmed
+    assert progress.truncated == frozenset()
     assert progress.stats["issues_total"] == 5
+
+
+def test_page_budget_truncation_stays_in_truncated() -> None:
+    """翻页触顶与展示裁剪是两件事：前者意味着统计只是下界。"""
+    progress = build(issues=[make_issue(1)], truncated=["issues"])
+    assert "issues" in progress.truncated
+    assert progress.trimmed == frozenset()
+
+
+def test_legacy_mode_matches_explicit_activity_selection() -> None:
+    """不传 selection 的单日路径，必须与显式活动口径完全一致。"""
+    issues = [make_issue(1), make_issue(2, state="closed", updated=NOON - timedelta(hours=1))]
+    pulls = [make_pull(10, merged=True), make_pull(11)]
+
+    legacy = build(issues=issues, pulls=pulls)
+    activity = build(issues=issues, pulls=pulls, selection=ReportSelection.activity())
+
+    assert legacy.fingerprint == activity.fingerprint
+    assert legacy.stats == activity.stats
+    assert [item.number for item in legacy.issues] == [item.number for item in activity.issues]
+    assert legacy.completion_mode is False
+
+
+def test_completion_keeps_only_items_completed_inside_window() -> None:
+    selection = ReportSelection.completion()
+    start, end = resolve_day_window(DAY, SH)
+
+    # 当日关闭、之后（窗口外）又被评论 → 仍属于本日交付
+    commented_later = make_issue(2, state="closed", updated=end + timedelta(hours=5), closed=NOON)
+    # 昨天关闭、今天被评论 → 不属于本日交付
+    closed_yesterday = make_issue(3, state="closed", updated=NOON, closed=start - timedelta(days=1))
+
+    progress = build(issues=[commented_later, closed_yesterday], selection=selection)
+
+    assert [item.number for item in progress.issues] == [2]
+    assert progress.issue_axis == "closed_at"
+    assert progress.completion_mode is True
+
+
+def test_completion_sorts_by_completion_time_not_update_time() -> None:
+    earlier_merge_but_later_update = make_pull(
+        10, merged_at=NOON - timedelta(hours=4), updated=NOON
+    )
+    later_merge = make_pull(11, merged_at=NOON - timedelta(hours=1), updated=NOON)
+
+    progress = build(
+        pulls=[earlier_merge_but_later_update, later_merge],
+        selection=ReportSelection.completion(),
+    )
+
+    assert [item.number for item in progress.pulls] == [11, 10]
+
+
+def test_completion_stats_have_no_open_items() -> None:
+    progress = build(
+        issues=[make_issue(1, state="closed", closed=NOON)],
+        pulls=[make_pull(10, merged_at=NOON)],
+        selection=ReportSelection.completion(),
+    )
+    assert progress.stats["issues_open"] == 0
+    assert progress.stats["pulls_open"] == 0
+    assert progress.stats["pulls_merged"] == 1
+
+
+def test_fingerprint_ignores_window_end_so_reruns_are_reused() -> None:
+    """窗口右端会被裁到「现在」；纳入指纹会让同一天重跑就白调一次模型。"""
+    first = build(issues=[make_issue(1)])
+    second = build(
+        issues=[make_issue(1)], window_end=first.window_end + timedelta(minutes=5)
+    )
+    assert first.fingerprint == second.fingerprint
+
+
+def test_fingerprint_reacts_to_completion_time() -> None:
+    selection = ReportSelection.completion()
+    before = build(issues=[make_issue(1, state="closed", closed=NOON)], selection=selection)
+    after = build(
+        issues=[make_issue(1, state="closed", closed=NOON - timedelta(hours=2))],
+        selection=selection,
+    )
+    assert before.fingerprint != after.fingerprint
+
+
+def test_summary_line_switches_to_completion_wording() -> None:
+    progress = build(
+        issues=[make_issue(1, state="closed", closed=NOON)],
+        pulls=[make_pull(10, merged_at=NOON)],
+        selection=ReportSelection.completion(),
+    )
+    line = summary_line(progress)
+    assert line.startswith("本期")
+    assert "1 个议题关闭" in line
+    assert "1 个 PR 合并" in line
+
+
+def test_risks_in_completion_mode_flag_merged_hot_labels() -> None:
+    progress = build(
+        pulls=[make_pull(10, merged_at=NOON, labels=("breaking-change",))],
+        selection=ReportSelection.completion(),
+    )
+    risks = detect_risks(progress)
+    assert len(risks) == 1
+    assert "breaking-change" in risks[0]
+    assert "回归验证" in risks[0]
 
 
 def test_highlights_prioritise_release_then_merge() -> None:

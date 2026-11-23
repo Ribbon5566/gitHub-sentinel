@@ -1,12 +1,15 @@
 """每日进展 / 报告的文件布局。
 
-    data/daily/{YYYY}/{MM}/{owner}__{repo}/{YYYY-MM-DD}.md
-    data/daily/{YYYY}/{MM}/{owner}__{repo}/{YYYY-MM-DD}-report.md
+    data/daily/{YYYY}/{MM}/{owner}__{repo}/{stem}.md
+    data/daily/{YYYY}/{MM}/{owner}__{repo}/{stem}-report.md
 
-三条约定：
+四条约定：
   1. 目录名走 domain.repo_slug()，不把 owner/repo 直接拼进路径；
-  2. 日期目录用「报告日」而不是生成时刻——回补昨天的数据就该落在昨天那一格；
-  3. 写入复用 write_text_atomic()，中途崩溃不会留下半份 md 被报告模块读到。
+  2. 目录的 YYYY/MM 用「报告日」而不是生成时刻——回补昨天的数据就该落在昨天那一格；
+     区间报告用期末日（date_to），跨月区间归档到期末所在月份；
+  3. 文件名由调用方给的 `stem` 决定（单日 `2026-11-23`、区间 `2026-11-01_to_2026-11-15`
+     再加口径后缀）。命名策略留在领域/服务层，存储不猜；
+  4. 写入复用 write_text_atomic()，中途崩溃不会留下半份 md 被报告模块读到。
 """
 
 from __future__ import annotations
@@ -28,13 +31,17 @@ class FileDailyStore:
         self._data_dir = data_dir.resolve()
 
     # ------------------------------------------------------------- 进度文档
-    def write_progress(self, *, repo_full_name: str, day: date, content: str) -> str:
-        target = self._path(repo_full_name, day, report=False)
+    def write_progress(
+        self, *, repo_full_name: str, day: date, content: str, stem: str | None = None
+    ) -> str:
+        target = self._path(repo_full_name, day, report=False, stem=stem)
         write_text_atomic(target, content)
         return self._relative(target)
 
-    def read_progress(self, repo_full_name: str, day: date) -> DailyDocument | None:
-        target = self._path(repo_full_name, day, report=False)
+    def read_progress(
+        self, repo_full_name: str, day: date, *, stem: str | None = None
+    ) -> DailyDocument | None:
+        target = self._path(repo_full_name, day, report=False, stem=stem)
         if not target.is_file():
             return None
         markdown = target.read_text(encoding="utf-8")
@@ -47,16 +54,22 @@ class FileDailyStore:
             meta=meta,
             body=body,
             sections=extract_sections(body),
+            date_from=_meta_date(meta.get("date_from")),
+            date_to=_meta_date(meta.get("date")),
         )
 
     # ------------------------------------------------------------- 报告文档
-    def write_report(self, *, repo_full_name: str, day: date, content: str) -> str:
-        target = self._path(repo_full_name, day, report=True)
+    def write_report(
+        self, *, repo_full_name: str, day: date, content: str, stem: str | None = None
+    ) -> str:
+        target = self._path(repo_full_name, day, report=True, stem=stem)
         write_text_atomic(target, content)
         return self._relative(target)
 
-    def read_report(self, repo_full_name: str, day: date) -> DailyDocument | None:
-        target = self._path(repo_full_name, day, report=True)
+    def read_report(
+        self, repo_full_name: str, day: date, *, stem: str | None = None
+    ) -> DailyDocument | None:
+        target = self._path(repo_full_name, day, report=True, stem=stem)
         if not target.is_file():
             return None
         markdown = target.read_text(encoding="utf-8")
@@ -74,13 +87,23 @@ class FileDailyStore:
             meta=meta,
             body=body,
             sections={},
+            date_from=_meta_date(meta.get("date_from")),
+            date_to=_meta_date(meta.get("date")),
         )
 
     # ---------------------------------------------------------------- 路径
-    def _path(self, repo_full_name: str, day: date, *, report: bool) -> Path:
+    def _path(
+        self,
+        repo_full_name: str,
+        day: date,
+        *,
+        report: bool,
+        stem: str | None = None,
+    ) -> Path:
         folder = self._root / f"{day:%Y}" / f"{day:%m}" / repo_slug(repo_full_name)
-        name = f"{day:%Y-%m-%d}-report.md" if report else f"{day:%Y-%m-%d}.md"
-        return folder / name
+        main = stem or f"{day:%Y-%m-%d}"
+        suffix = "-report" if report else ""
+        return folder / f"{main}{suffix}.md"
 
     def _relative(self, target: Path) -> str:
         resolved = target.resolve()
@@ -89,3 +112,13 @@ class FileDailyStore:
         except ValueError:
             # 用户把 SENTINEL_DAILY_DIR 指到 data 之外时，给绝对路径，CLI 原样打印
             return resolved.as_posix()
+
+
+def _meta_date(value: str | None) -> date | None:
+    """front matter 里的日期；缺失或写坏都当没有，不让读文件因为一个字段失败。"""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
