@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -40,8 +40,13 @@ async def test_api_requires_key(api) -> None:
     assert response.status_code == 401
 
 
-async def test_full_flow(api, make_event) -> None:
+async def test_full_flow(api, make_event, monkeypatch) -> None:
     client, container = api
+
+    # 冻住时钟且取秒数 30：报告窗口起点是「当前分钟整分」，若用真实时间且恰好跑在
+    # 整分后 1~4 秒，now-3s 就会落进上一分钟而被窗口排除，event_count 随机变成 2。
+    now = datetime(2026, 11, 23, 8, 41, 30, tzinfo=UTC)
+    monkeypatch.setattr(container.clock, "now", lambda: now)
 
     created = await client.post(
         "/api/v1/subscriptions",

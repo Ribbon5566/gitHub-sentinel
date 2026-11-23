@@ -112,9 +112,15 @@ async def test_fake_github_honours_etag(container) -> None:
     assert again.events == []
 
 
-async def test_digest_is_idempotent_for_same_content(container, make_event) -> None:
+async def test_digest_is_idempotent_for_same_content(
+    container, make_event, monkeypatch
+) -> None:
+    # 必须冻住时钟：报告窗口起点是「上一分钟的整分」，两次 build 之间一旦跨过分钟边界，
+    # period_start 就会变，幂等复用自然查不到——那会让这个用例随跑测时间随机失败。
+    now = datetime(2026, 11, 23, 1, 30, 15, tzinfo=UTC)
+    monkeypatch.setattr(container.clock, "now", lambda: now)
+
     sub = await make_sub(container, cron="* * * * *")
-    now = container.clock.now()
     await container.events.add_many(
         [make_event(sub_id=sub.id, external_id=f"e{i}", authored_at=now - timedelta(seconds=5))
          for i in range(3)]
