@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 
 from .application.collect_service import CollectService
+from .application.daily_progress_service import DailyProgressService
+from .application.daily_report_service import DailyReportService
 from .application.digest_service import DigestService
 from .application.notify_service import NotifyService
 from .application.pipeline import PipelineService
@@ -31,12 +33,15 @@ from .infrastructure.persistence.repositories import (
     SqlRunRepo,
     SqlSubscriptionRepo,
 )
+from .infrastructure.rendering.daily_renderer import JinjaDailyRenderer
+from .infrastructure.rendering.daily_store import FileDailyStore
 from .infrastructure.rendering.jinja_renderer import JinjaReportRenderer
 from .infrastructure.scheduling.scheduler import TickScheduler
+from .ports.daily import DailyStorePort
 from .ports.github import GitHubPort
 from .ports.llm import LLMProvider
 from .ports.notifier import Notifier
-from .ports.renderer import ReportRendererPort
+from .ports.renderer import DailyRendererPort, ReportRendererPort
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +66,16 @@ class Container:
         self.fallback_llm: LLMProvider | None = None
         self.notifier: Notifier
         self.renderer: ReportRendererPort
+        self.daily_store: DailyStorePort
+        self.daily_renderer: DailyRendererPort
 
         self.subscription_service: SubscriptionService
         self.collect_service: CollectService
         self.digest_service: DigestService
         self.notify_service: NotifyService
         self.pipeline: PipelineService
+        self.daily_progress_service: DailyProgressService
+        self.daily_report_service: DailyReportService
         self.scheduler: TickScheduler | None = None
 
     # ------------------------------------------------------------- lifecycle
@@ -118,6 +127,10 @@ class Container:
         self.llm, self.fallback_llm = self._build_llm()
         self.notifier = build_notifier(settings)
         self.renderer = JinjaReportRenderer(settings)
+        self.daily_store = FileDailyStore(
+            daily_root=settings.daily_root, data_dir=settings.data_dir
+        )
+        self.daily_renderer = JinjaDailyRenderer(settings)
 
     def _build_github(self) -> GitHubPort:
         settings = self.settings
@@ -134,6 +147,8 @@ class Container:
                 timeout=settings.github_timeout,
                 per_page=settings.github_per_page,
                 max_pages=settings.github_max_pages,
+                retry_attempts=settings.github_retry_attempts,
+                max_retry_wait=settings.github_max_retry_wait,
             )
         if settings.github_mode == "replay":
             logger.warning("github.mode=replay 尚未实现录制回放，暂用 FakeGitHub 代替")
@@ -143,18 +158,38 @@ class Container:
 
     def _build_llm(self) -> tuple[LLMProvider, LLMProvider | None]:
         settings = self.settings
-        if settings.llm_provider == "openai_compat":
+        if settings.llm_provider != "openai_compat":
+            logger.info("llm.primary=mock")
+            return MockLLM(), None
+
+        try:
             primary = OpenAICompatLLM(
                 base_url=settings.llm_base_url,
                 api_key=settings.llm_api_key,
                 model=settings.llm_model,
                 timeout=settings.llm_timeout,
                 max_input_chars=settings.llm_max_input_chars,
+                temperature=settings.llm_temperature,
+                thinking=settings.llm_thinking,
+                json_mode=settings.llm_json_mode,
+                report_timeout=settings.llm_report_timeout,
             )
-            fallback = MockLLM() if settings.llm_fallback_to_mock else None
-            logger.info("llm.primary=%s fallback=%s", primary.name, bool(fallback))
-            return primary, fallback
-        return MockLLM(), None
+        except LLMError as exc:
+            # 没有 key 不该连 GitHub 都跑不了：每日进展只依赖 GitHub，
+            # 报告环节再退回规则模板，比整个进程起不来更有用
+            if not settings.llm_fallback_to_mock:
+                raise
+            logger.warning("llm.primary_unavailable fallback=mock err=%s", exc)
+            return MockLLM(), None
+
+        fallback = MockLLM() if settings.llm_fallback_to_mock else None
+        logger.info(
+            "llm.primary=%s fallback=%s thinking=%s",
+            primary.name,
+            bool(fallback),
+            settings.llm_thinking,
+        )
+        return primary, fallback
 
     def _build_services(self) -> None:
         settings = self.settings
@@ -193,6 +228,20 @@ class Container:
             digest=self.digest_service,
             notify=self.notify_service,
             subs=self.subs,
+            clock=self.clock,
+            settings=settings,
+        )
+        self.daily_progress_service = DailyProgressService(
+            github=self.github,
+            store=self.daily_store,
+            renderer=self.daily_renderer,
+            clock=self.clock,
+            settings=settings,
+        )
+        self.daily_report_service = DailyReportService(
+            store=self.daily_store,
+            llm=self.llm,
+            renderer=self.daily_renderer,
             clock=self.clock,
             settings=settings,
         )

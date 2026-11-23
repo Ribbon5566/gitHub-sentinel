@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .dedup import dedup_key, event_version, query_key
 from .enums import DEFAULT_WATCH, DigestStyle, EventKind, NotifyStatus, ReportStatus, RunStatus
+from .errors import ValidationError
 from .schedule import normalize_cron, resolve_tz
 
 _REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -23,6 +24,20 @@ BODY_EXCERPT_LIMIT = 1200
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def normalize_repo_full_name(value: str) -> str:
+    """校验并返回 owner/repo。
+
+    单独抽出来是因为每日进展允许「不建订阅、直接指定仓库」，
+    但校验口径必须和订阅完全一致，否则 CLI 与 API 会给出两套答案。
+    """
+    text = (value or "").strip().strip("/")
+    if text.startswith("http"):
+        raise ValidationError("repo_full_name 只写 owner/repo，不要带 URL")
+    if not _REPO_PATTERN.match(text):
+        raise ValidationError("repo_full_name 格式应为 owner/repo")
+    return text
 
 
 def as_utc(moment: datetime | None) -> datetime | None:
@@ -81,12 +96,11 @@ class Subscription(BaseModel):
     @field_validator("repo_full_name")
     @classmethod
     def _check_repo(cls, value: str) -> str:
-        text = value.strip().strip("/")
-        if text.startswith("http"):
-            raise ValueError("repo_full_name 只写 owner/repo，不要带 URL")
-        if not _REPO_PATTERN.match(text):
-            raise ValueError("repo_full_name 格式应为 owner/repo")
-        return text
+        # pydantic 只把 ValueError 收进自己的错误列表，域异常在这里转一次
+        try:
+            return normalize_repo_full_name(value)
+        except ValidationError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("cron")
     @classmethod

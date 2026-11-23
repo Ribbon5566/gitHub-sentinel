@@ -1,0 +1,13 @@
+# {{ title }}
+
+{{ body_md }}
+{% if appendix %}
+
+## 附录：明细数据
+{% for name, content in appendix %}
+
+### {{ name }}
+
+{{ content }}
+{% endfor %}
+{% endif %}

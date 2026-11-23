@@ -126,7 +126,10 @@ class DigestSummary(BaseModel):
 
     @property
     def is_empty(self) -> bool:
-        return bool(self.headline or self.overview_md or self.highlights)
+        # 注意语义：没有标题、没有概述、没有要点才算空。
+        # v1.0 这里写成了 bool(...)，导致任何真实模型返回都被 parsing 判为「空」
+        # 并静默降级到 mock——因为当时 openai_compat 没有测试覆盖，一直没被发现。
+        return not (self.headline or self.overview_md or self.highlights)
 
 
 def build_digest_input(

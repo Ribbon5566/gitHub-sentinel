@@ -1,0 +1,25 @@
+## 一句话结论
+
+{{ headline }}
+
+## 关键进展
+
+{% for item in bullets %}
+- {{ item }}
+{% endfor %}
+
+## 风险与阻塞
+
+{% if risks %}
+{% for item in risks %}
+- {{ item }}
+{% endfor %}
+{% else %}
+无。
+{% endif %}
+
+## 下步计划
+
+{% for item in plans %}
+- {{ item }}
+{% endfor %}

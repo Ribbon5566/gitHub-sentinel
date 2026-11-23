@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sentinel.domain.digest import build_digest_input, content_hash
+import pytest
+
+from sentinel.domain.completion import CompletionRequest
+from sentinel.domain.digest import DigestSummary, build_digest_input, content_hash
 from sentinel.domain.enums import EventKind
+from sentinel.domain.errors import LLMError
 from sentinel.domain.models import Subscription
 from sentinel.infrastructure.llm.mock import MockLLM
 
@@ -68,3 +72,17 @@ def test_content_hash_order_independent(make_event) -> None:
     b = make_event(external_id="b", authored_at=now)
     assert content_hash([a, b]) == content_hash([b, a])
     assert content_hash([a, b]) != content_hash([a])
+
+
+async def test_mock_complete_refuses_to_fake_a_report() -> None:
+    """mock 模式下的报告必须由规则模板兜底，而不是拼一段像模像样的假文字。"""
+    request = CompletionRequest(system="s", user="u")
+    with pytest.raises(LLMError):
+        await MockLLM().complete(request)
+
+
+def test_summary_is_empty_means_really_empty() -> None:
+    """回归用例：这个属性写反会让真实模型输出被静默丢弃、永远走 mock 降级。"""
+    assert DigestSummary().is_empty is True
+    assert DigestSummary(headline="有内容").is_empty is False
+    assert DigestSummary(overview_md="有概述").is_empty is False

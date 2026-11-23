@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from ..domain.models import CollectRun, DigestReport, Subscription
 
@@ -41,3 +42,26 @@ class PipelineOutcome:
     digest: DigestOutcome | None = None
     notify: NotifyOutcome | None = None
     error: str | None = None
+
+
+@dataclass(slots=True)
+class DailyProgressOutcome:
+    repo_full_name: str
+    day: date
+    path: str
+    stats: dict[str, int]
+    fingerprint: str
+    item_count: int
+    truncated: tuple[str, ...] = ()
+    reused: bool = False
+
+
+@dataclass(slots=True)
+class DailyReportOutcome:
+    repo_full_name: str
+    day: date
+    path: str
+    model: str
+    degraded: bool = False
+    reused: bool = False
+    source_fingerprint: str = ""

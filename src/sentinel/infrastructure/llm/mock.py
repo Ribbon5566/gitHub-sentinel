@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+from ...domain.completion import CompletionRequest, CompletionResult
 from ...domain.digest import DigestInput, DigestSummary
 from ...domain.enums import EventKind
+from ...domain.errors import LLMError
 from ...domain.schedule import resolve_tz
 
 _KIND_LABEL = {
@@ -81,6 +83,15 @@ class MockLLM:
             risks=tuple(risks),
             model="mock-rules",
         )
+
+    async def complete(self, request: CompletionRequest) -> CompletionResult:
+        """刻意抛错而不是返回伪文本。
+
+        每日报告需要一个「没有模型也要有产出」的兜底，但那个兜底必须由
+        application 层的规则模板负责（它知道统计数字与风险清单）；
+        这里如果拼一段像模像样的文字，反而会掩盖「其实没调通模型」这件事。
+        """
+        raise LLMError("MockLLM 不支持自由文本生成，请使用规则兜底")
 
     async def aclose(self) -> None:
         return None

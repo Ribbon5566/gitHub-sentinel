@@ -19,6 +19,14 @@ def _haystack(text: str | None) -> str:
     return (text or "").lower()
 
 
+def is_bot_author(author: str | None) -> bool:
+    """机器人判定。抽出来给每日进展复用，避免两套「什么算 bot」的标准。"""
+    name = _haystack(author)
+    if not name:
+        return False
+    return name.endswith(_BOT_SUFFIXES) or name in _KNOWN_BOTS
+
+
 def _matches_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles if needle)
 
@@ -53,9 +61,7 @@ class EventFilter:
             return f"kind {event.kind.value} 未订阅"
 
         author = _haystack(event.author)
-        if self.skip_bots and (
-            author.endswith(_BOT_SUFFIXES) or author in _KNOWN_BOTS
-        ):
+        if self.skip_bots and is_bot_author(event.author):
             return "机器人账号"
 
         if author and author in self.author_exclude:

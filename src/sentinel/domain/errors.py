@@ -35,8 +35,16 @@ class GitHubError(SentinelError):
 
 
 class RateLimitError(GitHubError):
-    def __init__(self, message: str, *, reset_at: int | None = None, retry_after: int | None = None) -> None:
-        super().__init__(message, status=403)
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int = 403,
+        reset_at: int | None = None,
+        retry_after: int | None = None,
+        resource: str | None = None,
+    ) -> None:
+        super().__init__(message, status=status, resource=resource)
         self.reset_at = reset_at
         self.retry_after = retry_after
 

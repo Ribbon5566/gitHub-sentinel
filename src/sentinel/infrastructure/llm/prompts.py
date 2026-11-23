@@ -1,4 +1,8 @@
-"""提示词。集中在此，便于做 A/B 与回归对比。"""
+"""提示词。集中在此，便于做 A/B 与回归对比。
+
+每日报告的提示词在 domain/report.py：它和「四章节契约」必须放在一起改，
+而 application 层不许 import infrastructure（分层检查会拦）。
+"""
 
 from __future__ import annotations
 
@@ -33,3 +37,4 @@ def build_user_prompt(request: DigestInput, compact_events: str) -> str:
         f"以下是本周期的仓库动态：\n\n{compact_events}\n\n"
         "请严格按系统提示里的 JSON 结构输出。"
     )
+

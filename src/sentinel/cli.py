@@ -6,6 +6,11 @@
     collect    → 只采集（验证增量与去重）
     digest     → 只出报告（验证摘要与模板）
     tick --once→ 只跑一轮调度（验证抢占与重排）
+
+v2.0 追加的每日动线（与上面的 cron 简报是两条独立链路）：
+    progress   → 拉当日 issues/PR，落一份「项目+日期」的 md
+    report     → 只读那份 md，调模型出正式日报（不访问 GitHub）
+    daily      → 上面两步连着跑
 """
 
 from __future__ import annotations
@@ -13,11 +18,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from datetime import timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from .config import Settings, load_settings
 from .container import Container
-from .domain.models import FetchCursor, Subscription
+from .domain.errors import NotFoundError, SentinelError, ValidationError
+from .domain.models import FetchCursor, Subscription, normalize_repo_full_name
 from .logging_setup import configure_logging
 
 DEMO_REPO = "fastapi/fastapi"
@@ -53,6 +60,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     send = sub.add_parser("send-test", help="把指定报告再发一次")
     send.add_argument("--report-id", type=int, required=True)
+
+    for name, help_text in (
+        ("progress", "生成每日进展 Markdown（访问 GitHub，不调模型）"),
+        ("report", "从已有进展生成每日报告（调模型，不访问 GitHub）"),
+        ("daily", "每日进展 + 每日报告，一步跑完"),
+    ):
+        daily = sub.add_parser(name, help=help_text)
+        daily.add_argument(
+            "--repo", action="append", default=[], metavar="OWNER/REPO",
+            help="直接指定仓库，可重复；不要求已订阅",
+        )
+        daily.add_argument(
+            "--id", type=int, action="append", default=[], metavar="N",
+            help="按订阅 ID 指定，可重复",
+        )
+        daily.add_argument("--date", default=None, help="报告日期 YYYY-MM-DD，默认今天")
+        daily.add_argument("--force", action="store_true", help="忽略指纹，强制重新生成")
 
     return parser
 
@@ -225,6 +249,116 @@ async def _send_test(settings: Settings, args: argparse.Namespace) -> int:
         await container.shutdown()
 
 
+# --------------------------------------------------------------- 每日动线
+def _parse_day(raw: str | None, settings: Settings) -> date:
+    if not raw:
+        return datetime.now(settings.daily_tz).date()
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValidationError(f"--date 需要 YYYY-MM-DD，收到 {raw!r}") from exc
+
+
+async def _resolve_targets(
+    container: Container, args: argparse.Namespace
+) -> list[tuple[str, str | None]]:
+    """返回 [(repo, 展示名)]；--repo 不要求已订阅，--id 才查库。"""
+    if args.repo and args.id:
+        raise ValidationError("--repo 与 --id 不能同时使用")
+
+    if args.repo:
+        targets: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
+        for raw in args.repo:
+            repo = normalize_repo_full_name(raw)
+            if repo not in seen:
+                seen.add(repo)
+                targets.append((repo, None))
+        return targets
+
+    if args.id:
+        targets = []
+        seen = set()
+        for sub_id in args.id:
+            sub = await container.subs.get(sub_id)
+            if sub is None:
+                raise NotFoundError(f"订阅 {sub_id} 不存在")
+            if sub.repo_full_name not in seen:
+                seen.add(sub.repo_full_name)
+                targets.append((sub.repo_full_name, sub.display_name))
+        return targets
+
+    return [(sub.repo_full_name, sub.display_name) for sub in await container.subs.list_active()]
+
+
+def _stats_line(stats: dict[str, int]) -> str:
+    return (
+        f"议题 {stats.get('issues_total', 0)}（关闭 {stats.get('issues_closed', 0)}）/ "
+        f"PR {stats.get('pulls_total', 0)}"
+        f"（合并 {stats.get('pulls_merged', 0)}，草稿 {stats.get('pulls_draft', 0)}）/ "
+        f"提交 {stats.get('commits_total', 0)} / 发布 {stats.get('releases_total', 0)} / "
+        f"贡献者 {stats.get('contributors', 0)}"
+    )
+
+
+def _display(path: str) -> str:
+    """默认布局返回相对 data/ 的路径；用户自定义到 data 之外时就是绝对路径。"""
+    return path if Path(path).is_absolute() else f"data/{path}"
+
+
+async def _daily(
+    settings: Settings, args: argparse.Namespace, *, do_progress: bool, do_report: bool
+) -> int:
+    container = await _open(settings)
+    try:
+        try:
+            day = _parse_day(args.date, settings)
+            targets = await _resolve_targets(container, args)
+        except SentinelError as exc:
+            print(f"参数错误: {exc}", file=sys.stderr)
+            return 2
+
+        if not targets:
+            print("没有可处理的目标：先订阅仓库，或用 --repo 指定", file=sys.stderr)
+            return 1
+
+        code = 0
+        for index, (repo, title) in enumerate(targets, start=1):
+            print(f"[{index}/{len(targets)}] {repo} {day}")
+            try:
+                if do_progress:
+                    progress = await container.daily_progress_service.build(
+                        repo_full_name=repo, day=day, repo_title=title, force=args.force
+                    )
+                    suffix = "（内容未变，复用）" if progress.reused else ""
+                    print(f"  进展: {_display(progress.path)}{suffix}")
+                    print(f"  统计: {_stats_line(progress.stats)}")
+                    if progress.truncated:
+                        print(f"  提示: 以下资源触及条数上限被截断：{'、'.join(progress.truncated)}")
+
+                if do_report:
+                    report = await container.daily_report_service.build(
+                        repo_full_name=repo, day=day, force=args.force
+                    )
+                    if report.reused:
+                        print(f"  报告: {_display(report.path)}（内容未变，跳过模型调用）")
+                    else:
+                        note = "，规则兜底" if report.degraded else ""
+                        print(f"  报告: {_display(report.path)}  模型 {report.model}{note}")
+                        if report.degraded:
+                            print(
+                                "  警告: 模型未返回合格结果，已使用规则模板；"
+                                "检查 SENTINEL_LLM_* 后可加 --force 重跑"
+                            )
+            except SentinelError as exc:
+                # 一个仓库失败不中断其余仓库
+                print(f"  失败: {exc}", file=sys.stderr)
+                code = 1
+        return code
+    finally:
+        await container.shutdown()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = load_settings()
@@ -255,6 +389,9 @@ def main(argv: list[str] | None = None) -> int:
         "tick": lambda: _tick(cli_settings, args),
         "list": lambda: _list(cli_settings, args),
         "send-test": lambda: _send_test(cli_settings, args),
+        "progress": lambda: _daily(cli_settings, args, do_progress=True, do_report=False),
+        "report": lambda: _daily(cli_settings, args, do_progress=False, do_report=True),
+        "daily": lambda: _daily(cli_settings, args, do_progress=True, do_report=True),
     }
     handler = handlers.get(args.command)
     if handler is None:  # pragma: no cover
